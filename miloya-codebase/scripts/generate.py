@@ -1627,10 +1627,25 @@ def main():
     if query:
         index_state = load_existing_index_state(Path(project_path) / 'repo' / 'progress' / 'miloya-codebase.index.json')
         focus_pack = build_focus_context_pack(query, task, snapshot, index_state)
-        print(json.dumps(focus_pack or snapshot, indent=2, ensure_ascii=False))
+        write_json_stdout(focus_pack or snapshot)
         return
 
-    print(json.dumps(snapshot, indent=2, ensure_ascii=False))
+    write_json_stdout(snapshot)
+
+
+def write_json_stdout(payload: dict) -> None:
+    text = json.dumps(payload, indent=2, ensure_ascii=False) + '\n'
+    try:
+        sys.stdout.write(text)
+    except UnicodeEncodeError:
+        buffer = getattr(sys.stdout, 'buffer', None)
+        if buffer is not None:
+            buffer.write(text.encode('utf-8', errors='replace'))
+            buffer.flush()
+            return
+
+        safe_text = text.encode('ascii', errors='backslashreplace').decode('ascii')
+        sys.stdout.write(safe_text)
 
 
 if __name__ == '__main__':

@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import json
 import shutil
 import tempfile
@@ -20,6 +21,14 @@ EXTERNAL_CONTEXT_SPEC = importlib.util.spec_from_file_location("miloya_external_
 EXTERNAL_CONTEXT = importlib.util.module_from_spec(EXTERNAL_CONTEXT_SPEC)
 assert EXTERNAL_CONTEXT_SPEC.loader is not None
 EXTERNAL_CONTEXT_SPEC.loader.exec_module(EXTERNAL_CONTEXT)
+
+
+class FailingStdout:
+    def __init__(self) -> None:
+        self.buffer = io.BytesIO()
+
+    def write(self, text: str) -> int:
+        raise UnicodeEncodeError("gbk", text, 0, 1, "illegal multibyte sequence")
 
 
 class GenerateSnapshotTests(unittest.TestCase):
@@ -211,6 +220,16 @@ class GenerateSnapshotTests(unittest.TestCase):
         )
         routes = {(item["method"], item["path"]) for item in snapshot["apiRoutes"]}
         self.assertIn(("GET", "/users"), routes)
+
+    def test_stdout_writer_falls_back_when_console_cannot_encode(self) -> None:
+        fake_stdout = FailingStdout()
+
+        with patch.object(GENERATE.sys, "stdout", fake_stdout):
+            GENERATE.write_json_stdout({"warning": "⚠️", "status": "ok"})
+
+        rendered = fake_stdout.buffer.getvalue().decode("utf-8")
+        self.assertIn('"warning": "⚠️"', rendered)
+        self.assertIn('"status": "ok"', rendered)
 
     def test_snapshot_reuses_cached_result_when_sources_are_unchanged(self) -> None:
         first = GENERATE.generate_snapshot(str(self.temp_dir), force=True)
