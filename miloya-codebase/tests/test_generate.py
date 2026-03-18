@@ -39,8 +39,32 @@ class GenerateSnapshotTests(unittest.TestCase):
                     "app = FastAPI()",
                     "",
                     "@app.get('/real')",
-                    "def list_items():",
+                    "async def list_items():",
                     "    return []",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (self.temp_dir / "src" / "models.py").write_text(
+            "\n".join(
+                [
+                    "from dataclasses import dataclass",
+                    "",
+                    "@dataclass",
+                    "class Settings:",
+                    "    enabled: bool = True",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (self.temp_dir / "src" / "web.ts").write_text(
+            "\n".join(
+                [
+                    "import express from 'express';",
+                    "const router = express.Router();",
+                    "",
+                    "export const loadUsers = async () => [];",
+                    "router.get('/users', loadUsers);",
                 ]
             ),
             encoding="utf-8",
@@ -78,18 +102,83 @@ class GenerateSnapshotTests(unittest.TestCase):
     def test_snapshot_includes_context_engine_fields(self) -> None:
         snapshot = GENERATE.generate_snapshot(str(self.temp_dir), force=True)
 
-        self.assertEqual(snapshot["version"], "2.0")
+        self.assertEqual(snapshot["version"], "3.0")
         self.assertIn("sourceFingerprint", snapshot)
         self.assertIn("freshness", snapshot)
         self.assertIn("workspace", snapshot)
+        self.assertIn("analysis", snapshot)
+        self.assertIn("index", snapshot)
+        self.assertIn("chunkCatalog", snapshot)
+        self.assertIn("graph", snapshot)
+        self.assertIn("retrieval", snapshot)
+        self.assertIn("contextPacks", snapshot)
+        self.assertIn("externalContext", snapshot)
         self.assertIn("importantFiles", snapshot)
         self.assertIn("representativeSnippets", snapshot)
         self.assertIn("contextHints", snapshot)
         self.assertIsInstance(snapshot["importantFiles"], list)
         self.assertTrue(snapshot["importantFiles"])
+        self.assertTrue(snapshot["chunkCatalog"])
         self.assertEqual(snapshot["freshness"]["stale"], False)
         self.assertEqual(snapshot["workspace"]["rootManifests"], ["package.json"])
         self.assertIn("package.json", [item["path"] for item in snapshot["importantFiles"]])
+        self.assertEqual(snapshot["analysis"]["engines"]["Python"], "python-ast")
+        self.assertEqual(snapshot["index"]["fileCount"], 5)
+        self.assertGreater(snapshot["index"]["chunkCount"], 0)
+        self.assertIn("understand-project", snapshot["contextPacks"])
+        self.assertTrue(snapshot["graph"]["stats"]["symbols"] > 0)
+        self.assertIn("understand-project", snapshot["retrieval"]["availableTasks"])
+        self.assertIn("README.md", snapshot["externalContext"]["documentationSources"])
+
+    def test_snapshot_writes_index_state_with_chunks(self) -> None:
+        GENERATE.generate_snapshot(str(self.temp_dir), force=True)
+
+        index_state_path = self.temp_dir / "repo" / "progress" / "miloya-codebase.index.json"
+        self.assertTrue(index_state_path.exists())
+        index_state = json.loads(index_state_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(index_state["version"], "1.0")
+        self.assertIn("src/app.py", index_state["files"])
+        self.assertTrue(index_state["chunks"])
+        self.assertTrue(any(chunk["path"] == "src/app.py" for chunk in index_state["chunks"]))
+
+    def test_context_pack_query_returns_focused_matches(self) -> None:
+        snapshot = GENERATE.generate_snapshot(str(self.temp_dir), force=True)
+        index_state = GENERATE.load_existing_index_state(
+            self.temp_dir / "repo" / "progress" / "miloya-codebase.index.json"
+        )
+
+        pack = GENERATE.build_focus_context_pack(
+            query="fastapi routes users",
+            task="feature-delivery",
+            snapshot=snapshot,
+            index_state=index_state,
+        )
+
+        self.assertIsNotNone(pack)
+        self.assertEqual(pack["task"], "feature-delivery")
+        self.assertTrue(pack["matches"])
+        self.assertIn("src/app.py", pack["files"])
+
+    def test_ast_analysis_detects_async_python_functions_and_dataclasses(self) -> None:
+        snapshot = GENERATE.generate_snapshot(str(self.temp_dir), force=True)
+
+        key_functions = {(item["file"], item["name"]) for item in snapshot["keyFunctions"]}
+        data_models = {(item["file"], item["name"], item["type"]) for item in snapshot["dataModels"]}
+
+        self.assertIn(("src/app.py", "list_items"), key_functions)
+        self.assertIn(("src/models.py", "Settings", "dataclass"), data_models)
+
+    def test_typescript_analysis_reports_fallback_when_compiler_is_unavailable(self) -> None:
+        snapshot = GENERATE.generate_snapshot(str(self.temp_dir), force=True)
+
+        self.assertEqual(snapshot["analysis"]["engines"]["TypeScript"], "typescript-regex-fallback")
+        self.assertIn(
+            "typescript compiler unavailable; used regex fallback",
+            snapshot["analysis"]["warnings"],
+        )
+        routes = {(item["method"], item["path"]) for item in snapshot["apiRoutes"]}
+        self.assertIn(("GET", "/users"), routes)
 
     def test_snapshot_reuses_cached_result_when_sources_are_unchanged(self) -> None:
         first = GENERATE.generate_snapshot(str(self.temp_dir), force=True)
@@ -98,6 +187,10 @@ class GenerateSnapshotTests(unittest.TestCase):
         self.assertEqual(first["sourceFingerprint"], second["sourceFingerprint"])
         self.assertEqual(first["generatedAt"], second["generatedAt"])
         self.assertEqual(second["freshness"]["reason"], "source fingerprint unchanged")
+        self.assertEqual(second["index"]["delta"]["unchangedFiles"], second["index"]["fileCount"])
+        self.assertEqual(second["index"]["delta"]["changedFiles"], 0)
+        self.assertEqual(second["index"]["delta"]["newFiles"], 0)
+        self.assertTrue(second["index"]["reusedSnapshot"])
 
     def test_snapshot_regenerates_when_sources_change(self) -> None:
         first = GENERATE.generate_snapshot(str(self.temp_dir), force=True)
@@ -111,11 +204,11 @@ class GenerateSnapshotTests(unittest.TestCase):
                     "app = FastAPI()",
                     "",
                     "@app.get('/real')",
-                    "def list_items():",
+                    "async def list_items():",
                     "    return []",
                     "",
                     "@app.post('/real')",
-                    "def create_item():",
+                    "async def create_item():",
                     "    return {}",
                 ]
             ),
@@ -128,6 +221,8 @@ class GenerateSnapshotTests(unittest.TestCase):
         self.assertNotEqual(first["generatedAt"], second["generatedAt"])
         self.assertEqual(second["freshness"]["reason"], "regenerated because sources changed")
         self.assertIn(("POST", "/real"), {(item["method"], item["path"]) for item in second["apiRoutes"]})
+        self.assertEqual(second["index"]["delta"]["changedFiles"], 1)
+        self.assertFalse(second["index"]["reusedSnapshot"])
 
 
 if __name__ == "__main__":

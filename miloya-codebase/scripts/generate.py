@@ -14,17 +14,30 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from context_engine.analyzers import AnalyzerRegistry
+from context_engine.external_context import collect_external_context
+from context_engine.graph import build_code_graph
+from context_engine.retrieval import build_retrieval_artifacts, retrieve_chunks
+
 try:
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover
     tomllib = None
 
 
-SNAPSHOT_VERSION = '2.0'
+SNAPSHOT_VERSION = '3.0'
+INDEX_STATE_VERSION = '1.0'
 MAX_TEXT_FILE_BYTES = 512 * 1024
 MAX_IMPORTANT_FILES = 15
 MAX_REPRESENTATIVE_SNIPPETS = 5
 MAX_SNIPPET_LINES = 12
+MAX_CHUNK_LINES = 60
+MAX_CHUNK_PREVIEW_LINES = 16
+MAX_CHUNK_CATALOG_ITEMS = 40
 
 EXCLUDE_DIRS = {
     'node_modules', '.git', 'dist', 'build', 'venv', '__pycache__',
@@ -106,6 +119,7 @@ IMPORTANT_FILE_NAMES = {
     'Cargo.toml', 'pom.xml', 'README.md', 'README_zh.md', 'tsconfig.json',
     'vite.config.ts', 'vite.config.js', 'next.config.js', 'next.config.mjs',
 }
+ANALYZER_REGISTRY = AnalyzerRegistry(SCRIPT_DIR / 'context_engine' / 'ts_ast_bridge.js')
 
 
 def normalize_rel_path(path: str) -> str:
@@ -363,6 +377,22 @@ def build_source_fingerprint(files: list[str], project_path: str) -> str:
     return digest.hexdigest()
 
 
+def build_file_signatures(files: list[str], project_path: str) -> dict[str, dict]:
+    base = Path(project_path)
+    signatures = {}
+
+    for file_path in files:
+        path_obj = Path(file_path)
+        rel_path = normalize_rel_path(os.path.relpath(file_path, base))
+        stat = path_obj.stat()
+        signatures[rel_path] = {
+            'sizeBytes': stat.st_size,
+            'mtimeNs': stat.st_mtime_ns,
+        }
+
+    return signatures
+
+
 def get_newest_source_mtime(files: list[str]) -> str | None:
     if not files:
         return None
@@ -453,6 +483,7 @@ def collect_file_records(files: list[str], project_path: str) -> tuple[list[dict
         content = read_text_file(path_obj)
         line_count = len(content.splitlines()) if content is not None else 0
         total_lines += line_count
+        analysis = ANALYZER_REGISTRY.analyze_file(content, rel_path, project_path)
 
         records.append({
             'path': rel_path,
@@ -461,11 +492,15 @@ def collect_file_records(files: list[str], project_path: str) -> tuple[list[dict
             'lineCount': line_count,
             'sizeBytes': path_obj.stat().st_size,
             'content': content,
-            'imports': extract_imports(content, language) if content else [],
-            'exports': extract_exports(content, language) if content else [],
-            'apiRoutes': extract_api_routes(content, rel_path) if content else [],
-            'dataModels': extract_data_models(content, rel_path) if content else [],
-            'keyFunctions': extract_key_functions(content, rel_path) if content else [],
+            'imports': analysis.imports,
+            'exports': analysis.exports,
+            'apiRoutes': analysis.api_routes,
+            'dataModels': analysis.data_models,
+            'keyFunctions': analysis.key_functions,
+            'frameworkHints': analysis.framework_hints,
+            'analysisEngine': analysis.engine,
+            'analysisConfidence': analysis.confidence,
+            'analysisWarnings': analysis.warnings,
         })
 
     return records, total_lines
@@ -700,6 +735,267 @@ def build_context_hints(summary: dict, workspace: dict, important_files: list[di
     }
 
 
+def build_analysis_metadata(file_records: list[dict]) -> dict:
+    engines_by_language = {}
+    file_counts_by_engine = Counter()
+    warnings = []
+
+    for record in file_records:
+        engine = record.get('analysisEngine') or 'none'
+        file_counts_by_engine[engine] += 1
+        language = record.get('language')
+        if language and language not in engines_by_language and engine != 'none':
+            engines_by_language[language] = engine
+        warnings.extend(record.get('analysisWarnings', []))
+
+    return {
+        'engines': engines_by_language,
+        'filesByEngine': dict(sorted(file_counts_by_engine.items())),
+        'warnings': sorted(set(warnings)),
+    }
+
+
+def make_chunk_id(path: str, kind: str, start_line: int, end_line: int) -> str:
+    digest = hashlib.sha1(f'{path}:{kind}:{start_line}:{end_line}'.encode('utf-8')).hexdigest()[:12]
+    return f'{path}#{kind}:{start_line}-{end_line}:{digest}'
+
+
+def clip_chunk_preview(lines: list[str], start_line: int, end_line: int) -> str:
+    preview_end = min(end_line, start_line + MAX_CHUNK_PREVIEW_LINES - 1)
+    return '\n'.join(lines[start_line - 1:preview_end]).strip()
+
+
+def build_chunks(file_records: list[dict]) -> list[dict]:
+    chunks = []
+
+    for record in file_records:
+        content = record.get('content')
+        if not content:
+            continue
+
+        lines = content.splitlines()
+        if not lines:
+            continue
+
+        if record['language'] == 'Markdown':
+            chunks.extend(build_markdown_chunks(record, lines))
+            continue
+
+        anchor_lines: list[tuple[int, str, list[str]]] = []
+        for route in record.get('apiRoutes', []):
+            line_no = route.get('line')
+            if line_no:
+                anchor_lines.append((line_no, 'route', [route.get('method', ''), route.get('path', '')]))
+        for model in record.get('dataModels', []):
+            line_no = model.get('line')
+            if line_no:
+                anchor_lines.append((line_no, 'model', [model.get('type', ''), model.get('name', '')]))
+        for func in record.get('keyFunctions', []):
+            anchor_lines.append((func['line'], 'function', [func['name']]))
+
+        if anchor_lines:
+            seen_ranges = set()
+            for line_no, kind, signals in sorted(anchor_lines, key=lambda item: item[0]):
+                start_line = max(1, line_no - 3)
+                end_line = min(len(lines), start_line + MAX_CHUNK_LINES - 1)
+                range_key = (start_line, end_line)
+                if range_key in seen_ranges:
+                    continue
+                seen_ranges.add(range_key)
+                chunks.append({
+                    'id': make_chunk_id(record['path'], kind, start_line, end_line),
+                    'path': record['path'],
+                    'kind': kind,
+                    'language': record['language'],
+                    'startLine': start_line,
+                    'endLine': end_line,
+                    'signals': [signal for signal in signals if signal],
+                    'preview': clip_chunk_preview(lines, start_line, end_line),
+                    'analysisEngine': record.get('analysisEngine'),
+                    'analysisConfidence': record.get('analysisConfidence'),
+                })
+            continue
+
+        window_start = 1
+        window_index = 0
+        while window_start <= len(lines):
+            window_end = min(len(lines), window_start + MAX_CHUNK_LINES - 1)
+            chunks.append({
+                'id': make_chunk_id(record['path'], f'window-{window_index}', window_start, window_end),
+                'path': record['path'],
+                'kind': 'window',
+                'language': record['language'],
+                'startLine': window_start,
+                'endLine': window_end,
+                'signals': [],
+                'preview': clip_chunk_preview(lines, window_start, window_end),
+                'analysisEngine': record.get('analysisEngine'),
+                'analysisConfidence': record.get('analysisConfidence'),
+            })
+            window_index += 1
+            window_start = window_end + 1
+
+    return chunks
+
+
+def build_markdown_chunks(record: dict, lines: list[str]) -> list[dict]:
+    chunks = []
+    heading_indexes = [
+        index + 1
+        for index, line in enumerate(lines)
+        if line.strip().startswith('#')
+    ]
+
+    if not heading_indexes:
+        return [{
+            'id': make_chunk_id(record['path'], 'document', 1, min(len(lines), MAX_CHUNK_LINES)),
+            'path': record['path'],
+            'kind': 'document',
+            'language': record['language'],
+            'startLine': 1,
+            'endLine': min(len(lines), MAX_CHUNK_LINES),
+            'signals': ['documentation'],
+            'preview': clip_chunk_preview(lines, 1, min(len(lines), MAX_CHUNK_LINES)),
+            'analysisEngine': record.get('analysisEngine'),
+            'analysisConfidence': record.get('analysisConfidence'),
+        }]
+
+    for index, start_line in enumerate(heading_indexes):
+        next_heading = heading_indexes[index + 1] - 1 if index + 1 < len(heading_indexes) else len(lines)
+        end_line = min(next_heading, start_line + MAX_CHUNK_LINES - 1)
+        heading = lines[start_line - 1].strip().lstrip('#').strip()
+        chunks.append({
+            'id': make_chunk_id(record['path'], 'section', start_line, end_line),
+            'path': record['path'],
+            'kind': 'section',
+            'language': record['language'],
+            'startLine': start_line,
+            'endLine': end_line,
+            'signals': [heading] if heading else ['documentation'],
+            'preview': clip_chunk_preview(lines, start_line, end_line),
+            'analysisEngine': record.get('analysisEngine'),
+            'analysisConfidence': record.get('analysisConfidence'),
+        })
+
+    return chunks
+
+
+def load_existing_index_state(index_state_file: Path) -> dict | None:
+    if not index_state_file.exists():
+        return None
+
+    try:
+        return json.loads(index_state_file.read_text(encoding='utf-8'))
+    except Exception:
+        return None
+
+
+def diff_index_state(previous_state: dict | None, current_signatures: dict[str, dict]) -> dict:
+    previous_files = (previous_state or {}).get('files', {})
+    previous_paths = set(previous_files.keys())
+    current_paths = set(current_signatures.keys())
+
+    new_paths = current_paths - previous_paths
+    removed_paths = previous_paths - current_paths
+    shared_paths = current_paths & previous_paths
+    changed_paths = {
+        path for path in shared_paths
+        if {
+            'sizeBytes': previous_files.get(path, {}).get('sizeBytes'),
+            'mtimeNs': previous_files.get(path, {}).get('mtimeNs'),
+        } != current_signatures.get(path, {})
+    }
+    unchanged_paths = shared_paths - changed_paths
+
+    return {
+        'newFiles': len(new_paths),
+        'changedFiles': len(changed_paths),
+        'removedFiles': len(removed_paths),
+        'unchangedFiles': len(unchanged_paths),
+    }
+
+
+def build_chunk_catalog(chunks: list[dict], important_files: list[dict]) -> list[dict]:
+    important_paths = {item['path']: index for index, item in enumerate(important_files)}
+
+    ranked_chunks = sorted(
+        chunks,
+        key=lambda item: (
+            important_paths.get(item['path'], 999),
+            0 if item['kind'] in {'route', 'model', 'function', 'section'} else 1,
+            item['path'],
+            item['startLine'],
+        ),
+    )
+
+    catalog = []
+    for chunk in ranked_chunks[:MAX_CHUNK_CATALOG_ITEMS]:
+        catalog.append({
+            'id': chunk['id'],
+            'path': chunk['path'],
+            'kind': chunk['kind'],
+            'language': chunk['language'],
+            'startLine': chunk['startLine'],
+            'endLine': chunk['endLine'],
+            'signals': chunk['signals'],
+            'preview': chunk['preview'],
+        })
+    return catalog
+
+
+def build_index_metadata(
+    base: Path,
+    index_state_file: Path,
+    previous_state: dict | None,
+    current_signatures: dict[str, dict],
+    chunks: list[dict],
+    reusing_snapshot: bool,
+) -> dict:
+    delta = diff_index_state(previous_state, current_signatures)
+    return {
+        'stateVersion': INDEX_STATE_VERSION,
+        'statePath': normalize_rel_path(str(index_state_file.relative_to(base))),
+        'fileCount': len(current_signatures),
+        'chunkCount': len(chunks),
+        'reusedSnapshot': reusing_snapshot,
+        'delta': delta,
+    }
+
+
+def save_index_state(
+    index_state_file: Path,
+    current_signatures: dict[str, dict],
+    chunks: list[dict],
+    file_records: list[dict],
+    source_fingerprint: str,
+) -> None:
+    chunk_ids_by_path: dict[str, list[str]] = {}
+    for chunk in chunks:
+        chunk_ids_by_path.setdefault(chunk['path'], []).append(chunk['id'])
+
+    files_payload = {}
+    for record in file_records:
+        files_payload[record['path']] = {
+            **current_signatures.get(record['path'], {}),
+            'language': record['language'],
+            'lineCount': record['lineCount'],
+            'analysisEngine': record.get('analysisEngine'),
+            'analysisConfidence': record.get('analysisConfidence'),
+            'chunkIds': chunk_ids_by_path.get(record['path'], []),
+        }
+
+    payload = {
+        'version': INDEX_STATE_VERSION,
+        'generatedAt': utc_now_iso(),
+        'sourceFingerprint': source_fingerprint,
+        'files': files_payload,
+        'chunks': chunks,
+    }
+
+    index_state_file.parent.mkdir(parents=True, exist_ok=True)
+    index_state_file.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding='utf-8')
+
+
 def load_existing_snapshot(output_file: Path) -> dict | None:
     if not output_file.exists():
         return None
@@ -801,6 +1097,45 @@ def build_summary(
         'totalLines': total_lines,
         'dominantLanguages': dominant_languages,
         'importantPaths': [item['path'] for item in important_files[:8]],
+    }
+
+
+def build_focus_context_pack(
+    query: str,
+    task: str,
+    snapshot: dict,
+    index_state: dict | None,
+) -> dict | None:
+    if not query or not index_state:
+        return None
+
+    chunks = index_state.get('chunks', [])
+    if not chunks:
+        return None
+
+    graph = snapshot.get('graph', {})
+    important_files = snapshot.get('importantFiles', [])
+    external_context = snapshot.get('externalContext', {})
+    important_ranks = {item['path']: index for index, item in enumerate(important_files)}
+    recent_changed = set(external_context.get('recentChangedFiles', []))
+    file_dependency_map = {
+        item['path']: item['dependsOn']
+        for item in graph.get('fileDependencies', [])
+    }
+    matches = retrieve_chunks(
+        query=query,
+        chunks=chunks,
+        important_ranks=important_ranks,
+        recent_changed=recent_changed,
+        file_dependency_map=file_dependency_map,
+        task=task,
+        limit=12,
+    )
+    return {
+        'task': task,
+        'query': query,
+        'matches': matches,
+        'files': sorted(dict.fromkeys(match['path'] for match in matches)),
     }
 
 
@@ -1070,12 +1405,15 @@ def generate_snapshot(project_path: str, force: bool = False) -> dict:
     base = Path(project_path)
     output_dir = base / 'repo' / 'progress'
     output_file = output_dir / 'miloya-codebase.json'
+    index_state_file = output_dir / 'miloya-codebase.index.json'
 
     # Scan files
     files = scan_files(project_path)
     source_fingerprint = build_source_fingerprint(files, project_path)
+    current_signatures = build_file_signatures(files, project_path)
     newest_source_mtime = get_newest_source_mtime(files)
     existing_snapshot = load_existing_snapshot(output_file)
+    existing_index_state = load_existing_index_state(index_state_file)
 
     if (
         existing_snapshot
@@ -1087,18 +1425,46 @@ def generate_snapshot(project_path: str, force: bool = False) -> dict:
         freshness['stale'] = False
         freshness['reason'] = 'source fingerprint unchanged'
         freshness['newestSourceMtime'] = newest_source_mtime
+        existing_snapshot['index'] = build_index_metadata(
+            base,
+            index_state_file,
+            existing_index_state,
+            current_signatures,
+            (existing_index_state or {}).get('chunks', []),
+            reusing_snapshot=True,
+        )
+        existing_snapshot['chunkCatalog'] = build_chunk_catalog(
+            (existing_index_state or {}).get('chunks', []),
+            existing_snapshot.get('importantFiles', []),
+        )
         return existing_snapshot
 
+    file_records, total_lines = collect_file_records(files, project_path)
     # Detect framework
     frameworks = detect_framework(files, project_path)
+
+    for record in file_records:
+        for framework_hint in record.get('frameworkHints', []):
+            if framework_hint not in frameworks:
+                frameworks.append(framework_hint)
 
     # Find entry points
     entry_points = find_entry_points(files, project_path)
     dependencies = extract_dependencies(project_path)
-    file_records, total_lines = collect_file_records(files, project_path)
     workspace = detect_workspace(file_records, project_path, dependencies)
     important_files = build_important_files(file_records, entry_points, workspace)
     modules = summarize_modules_from_records(file_records)
+    analysis = build_analysis_metadata(file_records)
+    chunks = build_chunks(file_records)
+    chunk_catalog = build_chunk_catalog(chunks, important_files)
+    index_metadata = build_index_metadata(
+        base,
+        index_state_file,
+        existing_index_state,
+        current_signatures,
+        chunks,
+        reusing_snapshot=False,
+    )
 
     # Expand framework hints from dependency manifests
     for manifest_path, manifest_dependencies in dependencies.items():
@@ -1136,6 +1502,9 @@ def generate_snapshot(project_path: str, force: bool = False) -> dict:
                 'method': route['method'],
                 'path': route['path'],
                 'handler': record['path'],
+                'line': route.get('line'),
+                'source': record.get('analysisEngine'),
+                'confidence': record.get('analysisConfidence'),
             })
 
         for model in record['dataModels']:
@@ -1143,6 +1512,9 @@ def generate_snapshot(project_path: str, force: bool = False) -> dict:
                 'name': model['name'],
                 'type': model['type'],
                 'file': record['path'],
+                'line': model.get('line'),
+                'source': record.get('analysisEngine'),
+                'confidence': record.get('analysisConfidence'),
             })
 
         for func in record['keyFunctions']:
@@ -1178,6 +1550,9 @@ def generate_snapshot(project_path: str, force: bool = False) -> dict:
 
     # Infer architecture
     architecture = infer_architecture(files, project_path)
+    graph = build_code_graph(file_records, unique_routes, unique_models, key_functions, workspace)
+    external_context = collect_external_context(project_path, file_records)
+    retrieval, context_packs = build_retrieval_artifacts(chunks, important_files, graph, external_context)
 
     # Build snapshot
     snapshot = {
@@ -1194,11 +1569,18 @@ def generate_snapshot(project_path: str, force: bool = False) -> dict:
         'git': collect_git_context(project_path),
         'summary': summary,
         'workspace': workspace,
+        'analysis': analysis,
+        'index': index_metadata,
         'contextHints': context_hints,
         'fileTree': build_file_tree(files, project_path),
         'modules': modules,
         'dependencies': dependencies,
         'importantFiles': important_files,
+        'chunkCatalog': chunk_catalog,
+        'graph': graph,
+        'retrieval': retrieval,
+        'contextPacks': context_packs,
+        'externalContext': external_context,
         'representativeSnippets': build_representative_snippets(file_records, important_files),
         'apiRoutes': sorted(unique_routes, key=lambda item: (item['handler'], item['path'], item['method'])),
         'dataModels': sorted(unique_models, key=lambda item: (item['file'], item['type'], item['name'])),
@@ -1210,6 +1592,7 @@ def generate_snapshot(project_path: str, force: bool = False) -> dict:
     output_dir.mkdir(parents=True, exist_ok=True)
     with open(output_file, 'w', encoding='utf-8') as f:
         json.dump(snapshot, f, indent=2, ensure_ascii=False)
+    save_index_state(index_state_file, current_signatures, chunks, file_records, source_fingerprint)
 
     print(f"Snapshot saved to: {output_file}", file=sys.stderr)
     return snapshot
@@ -1217,11 +1600,23 @@ def generate_snapshot(project_path: str, force: bool = False) -> dict:
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python generate.py <project_path> [--force]", file=sys.stderr)
+        print("Usage: python generate.py <project_path> [--force] [--task <task>] [--query <query>]", file=sys.stderr)
         sys.exit(1)
 
     project_path = sys.argv[1]
     force = '--force' in sys.argv or '--refresh' in sys.argv
+    task = 'understand-project'
+    query = None
+
+    if '--task' in sys.argv:
+        task_index = sys.argv.index('--task')
+        if task_index + 1 < len(sys.argv):
+            task = sys.argv[task_index + 1]
+
+    if '--query' in sys.argv:
+        query_index = sys.argv.index('--query')
+        if query_index + 1 < len(sys.argv):
+            query = sys.argv[query_index + 1]
 
     if not os.path.isdir(project_path):
         print(f"Error: {project_path} is not a valid directory", file=sys.stderr)
@@ -1229,7 +1624,12 @@ def main():
 
     snapshot = generate_snapshot(project_path, force)
 
-    # Output JSON to stdout
+    if query:
+        index_state = load_existing_index_state(Path(project_path) / 'repo' / 'progress' / 'miloya-codebase.index.json')
+        focus_pack = build_focus_context_pack(query, task, snapshot, index_state)
+        print(json.dumps(focus_pack or snapshot, indent=2, ensure_ascii=False))
+        return
+
     print(json.dumps(snapshot, indent=2, ensure_ascii=False))
 
 
