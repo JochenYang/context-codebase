@@ -1,16 +1,22 @@
 ---
 name: miloya-codebase
-description: Generate a complete project snapshot (file tree, tech stack, API routes, data models, key functions) as JSON. Use when you need to quickly understand a project structure or when switching between models.
+description: Generate a professional project context snapshot with file tree, workspace layout, important files, representative snippets, routes, models, and key functions. Use when you need fast project understanding or model handoff context.
 ---
 
 # miloya-codebase
 
-Generate a complete project snapshot for quick understanding across model switches. Uses a Python script to analyze the project and outputs JSON to `{project}/repo/progress/miloya-codebase.json`.
+Generate a complete project context snapshot for fast model switching and large-repo understanding. The snapshot is saved to `{project}/repo/progress/miloya-codebase.json`.
+
+Key behavior:
+- Excludes its own generated cache under `repo/progress/`
+- Tracks a `sourceFingerprint` and `freshness` block
+- Reuses the cached snapshot automatically when sources have not changed
+- Produces high-signal navigation fields such as `workspace`, `contextHints`, `importantFiles`, and `representativeSnippets`
 
 ## Commands
 
 ### `/miloya-codebase`
-Generate a new project snapshot. Outputs JSON to conversation and saves to `{project}/repo/progress/miloya-codebase.json`.
+Generate a new project snapshot. If a compatible snapshot already exists and the source fingerprint is unchanged, the script returns the cached snapshot instead of rebuilding it.
 
 ### `/miloya-codebase refresh`
 Force regenerate the snapshot, overwriting the existing file.
@@ -20,36 +26,27 @@ Read and display the existing snapshot from `{project}/repo/progress/miloya-code
 
 ## How It Works
 
-This skill uses `scripts/generate.py` to perform the analysis. The model should:
+This skill uses `scripts/generate.py` to:
+1. Scan the project while excluding generated/vendor noise
+2. Detect frameworks, manifests, entry points, and architecture hints
+3. Extract routes, models, imports, exports, and named functions
+4. Rank high-signal files for reading order
+5. Save a reusable JSON snapshot for later sessions or other models
 
-1. Locate the skill directory
-2. Run the script with the current project path
-3. Output the resulting JSON in the conversation
-
-## Running the Script
-
-### Step 1: Find the script
-
-The script is located at: `{skill_dir}/scripts/generate.py`
-
-### Step 2: Run the script
+## Running The Script
 
 ```bash
 python {skill_dir}/scripts/generate.py <project_path>
 ```
 
 For refresh mode:
+
 ```bash
 python {skill_dir}/scripts/generate.py <project_path> --force
 ```
 
-### Step 3: Read the output
-
-The script outputs JSON to stdout. Read it and display in the conversation.
-
-### Step 4: Read existing snapshot
-
 To read an existing snapshot without regenerating:
+
 ```bash
 cat {project}/repo/progress/miloya-codebase.json
 ```
@@ -58,23 +55,76 @@ cat {project}/repo/progress/miloya-codebase.json
 
 ```json
 {
-  "version": "1.0",
+  "version": "2.0",
   "generatedAt": "2026-03-18T...",
   "projectPath": "/path/to/project",
+  "sourceFingerprint": "sha256...",
+  "freshness": {
+    "stale": false,
+    "reason": "source fingerprint unchanged",
+    "newestSourceMtime": "2026-03-18T...",
+    "snapshotPath": "repo/progress/miloya-codebase.json"
+  },
+  "git": {
+    "branch": "main",
+    "commit": "abc123",
+    "status": "clean"
+  },
   "summary": {
-    "name": "项目名",
+    "name": "project-name",
     "type": "web-api | frontend | monorepo | cli | ...",
+    "description": "Short README-derived project summary",
     "techStack": ["React", "Node.js"],
     "entryPoints": ["src/index.ts"],
     "totalFiles": 234,
-    "totalLines": 12840
+    "totalLines": 12840,
+    "dominantLanguages": [{ "language": "TypeScript", "files": 120 }],
+    "importantPaths": ["package.json", "src/index.ts"]
+  },
+  "workspace": {
+    "isMonorepo": false,
+    "rootManifests": ["package.json"],
+    "packages": []
+  },
+  "contextHints": {
+    "readOrder": ["package.json", "src/index.ts"],
+    "recommendedStart": "package.json",
+    "highSignalAreas": ["./", "src/"],
+    "monorepo": false,
+    "description": "Short README-derived project summary"
   },
   "fileTree": {
-    "src/": ["components/", "hooks/", "utils/"],
-    "src/components/": ["Button.tsx", "Modal.tsx"]
+    "./": ["README.md", "package.json"],
+    "src/": ["components/", "hooks/", "utils/"]
   },
-  "modules": {},
-  "dependencies": {},
+  "modules": {
+    "./": "Project root metadata and entry files; 4 files",
+    "src/": "Primary application source code; 42 files; notable areas: api, components, hooks"
+  },
+  "dependencies": {
+    "package.json": ["react", "typescript", "vite"]
+  },
+  "importantFiles": [
+    {
+      "path": "src/index.ts",
+      "role": "API surface",
+      "language": "TypeScript",
+      "lines": 180,
+      "imports": ["express"],
+      "exports": ["bootstrap"],
+      "score": 152,
+      "whyImportant": "entry point, 4 API routes, 3 exports"
+    }
+  ],
+  "representativeSnippets": [
+    {
+      "path": "src/index.ts",
+      "reason": "route definition",
+      "startLine": 10,
+      "endLine": 20,
+      "snippet": "..."
+    }
+  ],
   "apiRoutes": [
     { "method": "GET", "path": "/api/users", "handler": "src/api/users.ts" }
   ],
@@ -88,6 +138,17 @@ cat {project}/repo/progress/miloya-codebase.json
 }
 ```
 
+## Output Notes
+
+- Root-level files are stored under `fileTree["./"]` so models can see project entry metadata immediately.
+- `modules` contains top-level responsibility summaries.
+- `dependencies` contains root-level manifest dependencies when detectable.
+- `freshness` and `sourceFingerprint` determine whether the cached snapshot can be reused safely.
+- `workspace` and `contextHints` improve navigation for large repos and monorepos.
+- `importantFiles` ranks the highest-signal files for model reading order.
+- `representativeSnippets` exposes short anchor snippets from those files.
+- Route extraction ignores common source-code comments to reduce false positives.
+
 ## Storage
 
 **Path:** `{project}/repo/progress/miloya-codebase.json`
@@ -97,8 +158,8 @@ This file can be read by other models/tools to quickly understand the project wi
 ## Framework Detection
 
 The script detects:
-- **JavaScript/TypeScript**: React, Next.js, Vue, NestJS, Express, Angular, Svelte
-- **Python**: FastAPI, Flask, Django
-- **Go**: Gin
-- **Java**: Spring Boot
-- **Other**: Maven, Gradle, Rust (Cargo)
+- JavaScript/TypeScript: React, Next.js, Vue, NestJS, Express, Angular, Svelte
+- Python: FastAPI, Flask, Django, Pydantic, SQLAlchemy
+- Go: Gin
+- Java: Spring Boot
+- Other: Maven, Gradle, Rust (Cargo)
