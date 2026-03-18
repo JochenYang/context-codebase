@@ -5,6 +5,8 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "generate.py"
@@ -12,6 +14,12 @@ SPEC = importlib.util.spec_from_file_location("miloya_generate", MODULE_PATH)
 GENERATE = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(GENERATE)
+
+EXTERNAL_CONTEXT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "context_engine" / "external_context.py"
+EXTERNAL_CONTEXT_SPEC = importlib.util.spec_from_file_location("miloya_external_context", EXTERNAL_CONTEXT_PATH)
+EXTERNAL_CONTEXT = importlib.util.module_from_spec(EXTERNAL_CONTEXT_SPEC)
+assert EXTERNAL_CONTEXT_SPEC.loader is not None
+EXTERNAL_CONTEXT_SPEC.loader.exec_module(EXTERNAL_CONTEXT)
 
 
 class GenerateSnapshotTests(unittest.TestCase):
@@ -159,6 +167,30 @@ class GenerateSnapshotTests(unittest.TestCase):
         self.assertEqual(pack["task"], "feature-delivery")
         self.assertTrue(pack["matches"])
         self.assertIn("src/app.py", pack["files"])
+
+    def test_external_context_handles_non_utf8_git_output(self) -> None:
+        commit_stdout = "abc123\x1f2026-03-18T12:00:00+08:00\x1ffeature ".encode("gb18030") + b"\xae\n"
+        changed_stdout = "src\\app.py\nREADME.md\n".encode("utf-8")
+
+        with patch.object(
+            EXTERNAL_CONTEXT.subprocess,
+            "run",
+            side_effect=[
+                SimpleNamespace(returncode=0, stdout=commit_stdout, stderr=b""),
+                SimpleNamespace(returncode=0, stdout=changed_stdout, stderr=b""),
+            ],
+        ):
+            context = EXTERNAL_CONTEXT.collect_external_context(
+                str(self.temp_dir),
+                [
+                    {"path": "README.md", "language": "Markdown"},
+                    {"path": "src/app.py", "language": "Python"},
+                ],
+            )
+
+        self.assertEqual(context["recentCommits"][0]["hash"], "abc123")
+        self.assertEqual(context["recentChangedFiles"], ["src/app.py", "README.md"])
+        self.assertTrue(isinstance(context["recentCommits"][0]["summary"], str))
 
     def test_ast_analysis_detects_async_python_functions_and_dataclasses(self) -> None:
         snapshot = GENERATE.generate_snapshot(str(self.temp_dir), force=True)

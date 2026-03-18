@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import locale
 import subprocess
-from pathlib import Path
 
 
 def collect_external_context(project_path: str, file_records: list[dict]) -> dict:
@@ -22,25 +22,21 @@ def collect_external_context(project_path: str, file_records: list[dict]) -> dic
 
 
 def collect_recent_commits(project_path: str, limit: int = 8) -> list[dict]:
-    try:
-        completed = subprocess.run(
-            [
-                'git',
-                'log',
-                f'-{limit}',
-                '--date=iso-strict',
-                '--pretty=format:%H%x1f%ad%x1f%s',
-            ],
-            cwd=project_path,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-    except Exception:
+    stdout = run_git_command(
+        project_path,
+        [
+            'git',
+            'log',
+            f'-{limit}',
+            '--date=iso-strict',
+            '--pretty=format:%H%x1f%ad%x1f%s',
+        ],
+    )
+    if not stdout:
         return []
 
     commits = []
-    for line in completed.stdout.splitlines():
+    for line in stdout.splitlines():
         parts = line.split('\x1f')
         if len(parts) != 3:
             continue
@@ -53,19 +49,12 @@ def collect_recent_commits(project_path: str, limit: int = 8) -> list[dict]:
 
 
 def collect_recent_changed_files(project_path: str, limit: int = 20) -> list[str]:
-    try:
-        completed = subprocess.run(
-            ['git', 'diff', '--name-only', 'HEAD~5..HEAD'],
-            cwd=project_path,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-    except Exception:
+    stdout = run_git_command(project_path, ['git', 'diff', '--name-only', 'HEAD~5..HEAD'])
+    if not stdout:
         return []
 
     changed = []
-    for line in completed.stdout.splitlines():
+    for line in stdout.splitlines():
         normalized = line.strip().replace('\\', '/')
         if normalized:
             changed.append(normalized)
@@ -88,3 +77,46 @@ def infer_conventions(file_records: list[dict]) -> list[str]:
         conventions.append('Context-engine logic is isolated under scripts/context_engine/.')
     return conventions
 
+
+def run_git_command(project_path: str, args: list[str]) -> str:
+    try:
+        completed = subprocess.run(
+            args,
+            cwd=project_path,
+            capture_output=True,
+            text=False,
+            check=False,
+        )
+    except Exception:
+        return ''
+
+    if getattr(completed, 'returncode', 1) != 0:
+        return ''
+
+    return decode_subprocess_output(getattr(completed, 'stdout', b''))
+
+
+def decode_subprocess_output(payload: bytes | str | None) -> str:
+    if payload is None:
+        return ''
+    if isinstance(payload, str):
+        return payload
+
+    encodings = []
+    preferred = locale.getpreferredencoding(False)
+    if preferred:
+        encodings.append(preferred)
+    encodings.extend(['utf-8', 'gb18030'])
+
+    seen = set()
+    for encoding in encodings:
+        normalized = encoding.lower()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        try:
+            return payload.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+
+    return payload.decode('utf-8', errors='replace')
