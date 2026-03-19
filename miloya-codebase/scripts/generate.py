@@ -1242,6 +1242,7 @@ def build_read_payload(
     important_files = snapshot.get('importantFiles', [])
     representative_snippets = snapshot.get('representativeSnippets', [])
     query_intent = infer_query_intent(normalized_query)
+    read_profile = select_read_profile(query_intent)
     read_limits = determine_read_limits(query_intent)
 
     if normalized_query:
@@ -1255,10 +1256,14 @@ def build_read_payload(
         file_paths = build_default_read_paths(snapshot, task_pack)
         task_description = task_pack.get('description') or describe_task(snapshot, selected_task)
 
-    file_paths = prioritize_read_file_paths(file_paths, snippet_items, query_intent)
+    snippet_items = rerank_read_matches(snippet_items, query_intent, read_profile)
+    file_paths = prioritize_read_file_paths(file_paths, snippet_items, query_intent, read_profile)
+    file_paths = refine_read_file_paths(snapshot, file_paths, query_intent, read_profile)
 
     return {
         'mode': 'read',
+        'responseMode': 'lightweight',
+        'packVersion': '1.0',
         'task': selected_task,
         'query': normalized_query,
         'snapshotPath': snapshot.get('freshness', {}).get('snapshotPath'),
@@ -1271,6 +1276,7 @@ def build_read_payload(
             'highSignalAreas': quick_start.get('highSignalAreas', [])[:8],
         },
         'queryIntent': query_intent,
+        'queryProfile': read_profile['name'],
         'taskDescription': task_description,
         'availableTasks': available_tasks,
         'files': build_read_file_entries(
@@ -1281,13 +1287,141 @@ def build_read_payload(
             index_state,
             snippet_items[:read_limits['snippets']],
         ),
-        'snippets': build_read_snippets(snippet_items[:read_limits['snippets']], representative_snippets),
+        'snippets': build_read_snippets(
+            snippet_items[:read_limits['snippets']],
+            representative_snippets,
+            query_intent,
+        ),
         'flowAnchors': build_read_flow_anchors(file_paths, snippet_items, query_intent, read_limits['anchors']),
         'nextHops': build_read_next_hops(snapshot, file_paths, snippet_items, query_intent)[:read_limits['nextHops']],
         'searchScope': build_read_search_scope(snapshot, file_paths[:read_limits['files']]),
         'hotspots': graph.get('hotspots', [])[:8],
         'moduleDependencies': graph.get('moduleDependencies', [])[:12],
         'externalContext': summarize_external_context(snapshot.get('externalContext', {})),
+        'constraints': {
+            'preferPayloadFirst': True,
+            'avoidRepoWideSearch': True,
+            'preserveMainThreadTokens': True,
+            'preferLightweightAnswer': True,
+            'avoidLongReport': True,
+            'preferBriefImplementationSummary': True,
+            'primaryGoal': 'locate-code-and-briefly-explain',
+            'maxFiles': read_limits['files'],
+            'maxSnippets': read_limits['snippets'],
+            'maxAnchors': read_limits['anchors'],
+            'maxNextHops': read_limits['nextHops'],
+            'maxWords': read_limits['maxWords'],
+        },
+        'recommendedAnswerShape': {
+            'style': 'brief-technical-answer',
+            'leadWithSummary': True,
+            'maxWords': read_limits['maxWords'],
+            'sections': ['summary', 'core-files', 'code-anchors', 'brief-flow'],
+            'focus': 'tell the model where the code is and briefly how it works',
+            'avoid': ['full technical report', 'broad architecture essay', 'repo-wide expansion'],
+        },
+        'hostHints': {
+            'preferredExecution': 'main-thread',
+            'consumeAs': 'read-pack',
+            'outputStyle': 'lightweight-answer',
+            'parentThreadAction': 'answer-from-pack',
+            'allowParentThreadExpansion': 'limited',
+            'preferredNarrative': 'locate-and-briefly-explain',
+            'returnSummaryFirst': True,
+        },
+    }
+
+
+def build_report_payload(
+    snapshot: dict,
+    index_state: dict | None,
+    task: str,
+    query: str | None,
+) -> dict:
+    read_payload = build_read_payload(snapshot, index_state, task, query)
+    query_intent = read_payload.get('queryIntent', {})
+    report_limits = determine_report_limits(query_intent)
+    graph = snapshot.get('graph', {})
+    summary = snapshot.get('summary', {})
+
+    core_files = read_payload.get('files', [])[:report_limits['coreFiles']]
+    snippets = read_payload.get('snippets', [])[:report_limits['snippets']]
+    flow_anchors = read_payload.get('flowAnchors', [])[:report_limits['anchors']]
+    next_hops = read_payload.get('nextHops', [])[:report_limits['nextHops']]
+    search_scope = read_payload.get('searchScope', {})
+    prefer_paths = search_scope.get('preferPaths', [])
+    focus_modules = infer_focus_modules(prefer_paths)
+
+    return {
+        'mode': 'report',
+        'reportMode': 'deep-pack',
+        'reportPackVersion': '1.0',
+        'task': read_payload.get('task'),
+        'query': read_payload.get('query'),
+        'snapshotPath': read_payload.get('snapshotPath'),
+        'sourceFingerprint': read_payload.get('sourceFingerprint'),
+        'freshness': read_payload.get('freshness'),
+        'analysis': read_payload.get('analysis'),
+        'questionType': {
+            'labels': query_intent.get('labels', []),
+            'keywords': query_intent.get('keywords', [])[:16],
+            'confidence': infer_report_confidence(query_intent, core_files, snippets),
+        },
+        'summary': {
+            'project': summary.get('name'),
+            'type': summary.get('type'),
+            'description': summary.get('description'),
+            'techStack': summary.get('techStack', [])[:8],
+            'architecture': snapshot.get('architecture'),
+            'entryPoints': summary.get('entryPoints', [])[:8],
+        },
+        'taskDescription': read_payload.get('taskDescription'),
+        'coreFiles': core_files,
+        'snippets': snippets,
+        'flowAnchors': flow_anchors,
+        'nextHops': next_hops,
+        'focusModules': focus_modules,
+        'moduleDependencies': filter_report_module_dependencies(
+            graph.get('moduleDependencies', []),
+            focus_modules,
+            report_limits['moduleDependencies'],
+        ),
+        'hotspots': graph.get('hotspots', [])[:report_limits['hotspots']],
+        'searchScope': search_scope,
+        'constraints': {
+            'preferSubagent': True,
+            'fallbackToMainThread': True,
+            'preferEvidence': True,
+            'avoidRepoWideSearch': True,
+            'preserveMainThreadTokens': True,
+            'delegationRequiredIfAvailable': True,
+            'allowParentThreadExpansion': False,
+            'parentThreadAction': 'stop-after-pack',
+            'maxFiles': report_limits['coreFiles'],
+            'maxSnippets': report_limits['snippets'],
+            'maxAnchors': report_limits['anchors'],
+            'maxNextHops': report_limits['nextHops'],
+            'maxWords': report_limits['maxWords'],
+        },
+        'recommendedReportShape': {
+            'style': 'deep-technical-report',
+            'leadWithSummary': True,
+            'maxWords': report_limits['maxWords'],
+            'sections': determine_report_sections(query_intent, read_payload.get('task')),
+            'evidenceStyle': 'cite file paths, line anchors, and clearly separate facts from inference',
+        },
+        'hostHints': {
+            'preferredExecution': 'subagent',
+            'fallbackExecution': 'main-thread',
+            'consumeAs': 'deep-pack',
+            'outputStyle': 'pack-only',
+            'parentThreadAction': 'stop-after-pack',
+            'delegationRequiredIfAvailable': True,
+            'allowParentThreadExpansion': False,
+            'returnSummaryFirst': True,
+        },
+        'externalContext': read_payload.get('externalContext'),
+        'availableTasks': read_payload.get('availableTasks', []),
     }
 
 
@@ -1452,48 +1586,183 @@ def determine_read_limits(query_intent: dict) -> dict[str, int]:
     labels = set(query_intent.get('labels', []))
     keywords = set(query_intent.get('keywords', []))
     limits = {
-        'files': 8,
-        'snippets': 8,
-        'nextHops': 5,
-        'anchors': 5,
+        'files': 4,
+        'snippets': 3,
+        'nextHops': 2,
+        'anchors': 4,
+        'maxWords': 380,
     }
 
     if 'integration-flow' in labels or 'routing-flow' in labels:
         limits.update({
-            'files': 6,
-            'snippets': 6,
-            'nextHops': 4,
-            'anchors': 6,
+            'files': 4,
+            'snippets': 3,
+            'nextHops': 2,
+            'anchors': 4,
+            'maxWords': 420,
         })
     elif 'configuration' in labels or 'documentation-link' in labels:
         limits.update({
-            'files': 6,
-            'snippets': 6,
-            'nextHops': 4,
+            'files': 4,
+            'snippets': 3,
+            'nextHops': 2,
             'anchors': 4,
+            'maxWords': 380,
         })
     elif 'runtime-flow' in labels:
         limits.update({
-            'files': 6,
-            'snippets': 6,
-            'nextHops': 4,
-            'anchors': 5,
+            'files': 4,
+            'snippets': 3,
+            'nextHops': 2,
+            'anchors': 4,
+            'maxWords': 400,
         })
 
     if keywords & GENERAL_QUERY_ACTION_TERMS:
-        limits['files'] = min(limits['files'], 6)
-        limits['snippets'] = min(limits['snippets'], 5)
+        limits['files'] = min(limits['files'], 4)
+        limits['snippets'] = min(limits['snippets'], 3)
 
     return limits
+
+
+def select_read_profile(query_intent: dict) -> dict:
+    keyword_set = set(query_intent.get('keywords', []))
+    exact_terms = set(query_intent.get('terms', []))
+    action_terms = keyword_set & GENERAL_QUERY_ACTION_TERMS
+    profile = {
+        'name': 'generic',
+        'focusManagerTokens': set(),
+        'focusEntrySuffixes': set(),
+        'suppressPathTokens': [],
+        'boostSymbolTerms': set(),
+        'penalizeSymbolTerms': set(),
+    }
+
+    if keyword_set & {'skill', 'skills', 'plugin', 'plugins'} and action_terms:
+        profile.update({
+            'name': 'skill-runtime',
+            'focusManagerTokens': {'skillmanager', 'pluginmanager'},
+            'focusEntrySuffixes': {'main.ts', 'preload.ts'},
+            'suppressPathTokens': [
+                '/libs/:runtime',
+                '/scripts/:setup',
+            ],
+            'boostSymbolTerms': exact_terms & {'download', 'install', 'remove', 'delete'},
+            'penalizeSymbolTerms': {'install', 'setup'} - exact_terms,
+        })
+
+    return profile
+
+
+def determine_report_limits(query_intent: dict) -> dict[str, int]:
+    read_limits = determine_read_limits(query_intent)
+    return {
+        'coreFiles': max(read_limits['files'], 6),
+        'snippets': max(read_limits['snippets'], 6),
+        'anchors': max(read_limits['anchors'], 6),
+        'nextHops': max(read_limits['nextHops'], 4),
+        'moduleDependencies': 10,
+        'hotspots': 8,
+        'maxWords': 1400,
+    }
+
+
+def infer_focus_modules(file_paths: list[str]) -> list[str]:
+    modules = []
+    seen = set()
+    for path in file_paths:
+        module = infer_path_module(path)
+        if not module or module in seen:
+            continue
+        seen.add(module)
+        modules.append(module)
+        if len(modules) >= 6:
+            break
+    return modules
+
+
+def infer_path_module(path: str) -> str:
+    normalized = normalize_rel_path(path)
+    parts = Path(normalized).parts
+    if not parts:
+        return './'
+    if len(parts) >= 4 and parts[0] == 'src' and parts[1] in {'main', 'renderer', 'common'}:
+        return f'{parts[0]}/{parts[1]}/{parts[2]}/'
+    if len(parts) >= 2 and parts[0] == 'src':
+        return f'{parts[0]}/{parts[1]}/'
+    if len(parts) >= 2 and parts[0] in {'SKILLs', 'skills', 'packages', 'apps', 'openclaw-extensions'}:
+        return f'{parts[0]}/{parts[1]}/'
+    if len(parts) == 1:
+        return './'
+    first_part = next(iter(parts), '')
+    return './' if not first_part else f'{first_part}/'
+
+
+def filter_report_module_dependencies(
+    dependencies: list[dict],
+    focus_modules: list[str],
+    limit: int,
+) -> list[dict]:
+    if not dependencies:
+        return []
+    focus_set = set(focus_modules)
+    prioritized = []
+    deferred = []
+    for item in dependencies:
+        source = item.get('source')
+        target = item.get('target')
+        if source in focus_set or target in focus_set:
+            prioritized.append(item)
+        else:
+            deferred.append(item)
+    return (prioritized + deferred)[:limit]
+
+
+def infer_report_confidence(query_intent: dict, core_files: list[dict], snippets: list[dict]) -> float:
+    labels = query_intent.get('labels', [])
+    evidence_count = len(core_files) + len(snippets)
+    if not evidence_count:
+        return 0.35
+    confidence = 0.45 + min(len(labels), 3) * 0.1 + min(evidence_count, 8) * 0.03
+    return round(min(confidence, 0.95), 2)
+
+
+def determine_report_sections(query_intent: dict, task: str | None) -> list[str]:
+    labels = set(query_intent.get('labels', []))
+    sections = ['summary', 'core-files', 'code-anchors']
+
+    if {'integration-flow', 'routing-flow', 'runtime-flow'} & labels:
+        sections.append('call-chain')
+    if 'configuration' in labels or 'persistence-flow' in labels:
+        sections.append('config-and-persistence')
+    if 'type-definition' in labels:
+        sections.append('related-types')
+    if task in {'bugfix-investigation', 'code-review'}:
+        sections.append('risks')
+
+    sections.append('facts-vs-inference')
+
+    seen = set()
+    ordered = []
+    for section in sections:
+        if section in seen:
+            continue
+        seen.add(section)
+        ordered.append(section)
+    return ordered
 
 
 def prioritize_read_file_paths(
     file_paths: list[str],
     snippet_items: list[dict],
     query_intent: dict,
+    read_profile: dict,
 ) -> list[str]:
     labels = set(query_intent.get('labels', []))
     query_terms = set(query_intent.get('keywords', []))
+    exact_terms = set(query_intent.get('terms', []))
+    action_terms = query_terms & GENERAL_QUERY_ACTION_TERMS
+    exact_action_terms = exact_terms & GENERAL_QUERY_ACTION_TERMS
     snippet_paths = [item.get('path') for item in snippet_items if item.get('path')]
     ordered_candidates = []
     ordered_candidates.extend(snippet_paths)
@@ -1548,7 +1817,7 @@ def prioritize_read_file_paths(
 
         if lowered.startswith('src/') or lowered.startswith('app/') or lowered.startswith('server/'):
             score += 12
-        if any(token in lowered for token in ['/docs/', 'readme', 'skill.md', 'prompt', '/rules/']):
+        if query_terms and any(token in lowered for token in ['/docs/', 'readme', 'skill.md', 'prompt', '/rules/']):
             score -= 18
         if (lowered.startswith('scripts/') or '/scripts/' in lowered) and not (query_terms & {'script', 'setup', 'build', 'cli'}):
             score -= 10
@@ -1556,6 +1825,9 @@ def prioritize_read_file_paths(
         keyword_overlap = len(path_terms & query_terms)
         if keyword_overlap:
             score += min(keyword_overlap, 3) * 12
+        exact_overlap = len(path_terms & exact_terms)
+        if exact_overlap:
+            score += min(exact_overlap, 2) * 18
 
         if 'integration-flow' in labels or 'routing-flow' in labels:
             if any(token in lowered for token in structural_tokens):
@@ -1576,10 +1848,107 @@ def prioritize_read_file_paths(
                 token in lowered for token in ['manager', 'service', 'handler', 'controller', 'route', 'router', 'store', 'gateway', 'adapter']
             ):
                 score += 14
+            if exact_action_terms and any(token in lowered for token in ['manager', 'skillmanager', 'pluginmanager']):
+                score += 18
+
+        score += score_path_with_profile(path, query_intent, read_profile)
 
         return (-score, 0 if path in snippet_paths else 1, path)
 
     return sorted(deduped, key=score_path)
+
+
+def score_path_with_profile(path: str, query_intent: dict, read_profile: dict) -> int:
+    lowered = normalize_rel_path(path).lower()
+    query_terms = set(query_intent.get('keywords', []))
+    exact_terms = set(query_intent.get('terms', []))
+    action_terms = query_terms & GENERAL_QUERY_ACTION_TERMS
+    exact_action_terms = exact_terms & GENERAL_QUERY_ACTION_TERMS
+    score = 0
+
+    for token in read_profile.get('focusManagerTokens', set()):
+        if token in lowered:
+            score += 42
+
+    for suffix in read_profile.get('focusEntrySuffixes', set()):
+        if lowered.endswith('/' + suffix) or lowered.endswith(suffix):
+            score += 20 if suffix == 'main.ts' else 18
+
+    if is_suppressed_by_profile(path, query_intent, read_profile):
+        if '/libs/' in lowered:
+            score -= 16
+        if lowered.startswith('scripts/') or '/scripts/' in lowered:
+            score -= 24
+
+    if action_terms and not exact_action_terms and any(token in lowered for token in ['install', 'setup']):
+        score -= 8
+
+    return score
+
+
+def is_suppressed_by_profile(path: str, query_intent: dict, read_profile: dict) -> bool:
+    lowered = normalize_rel_path(path).lower()
+    keyword_set = set(query_intent.get('keywords', []))
+    exact_terms = set(query_intent.get('terms', []))
+    if exact_terms & {'runtime', 'script', 'setup', 'python'}:
+        return False
+    if keyword_set & {'runtime', 'script', 'setup', 'python'} and exact_terms:
+        return False
+    for rule in read_profile.get('suppressPathTokens', []):
+        prefix, _, token = rule.partition(':')
+        prefix = prefix or ''
+        token = token or ''
+        if prefix and prefix not in lowered:
+            continue
+        if token and token not in lowered:
+            continue
+        return True
+    return False
+
+
+def refine_read_file_paths(snapshot: dict, file_paths: list[str], query_intent: dict, read_profile: dict) -> list[str]:
+    deduped = []
+    seen = set()
+    for path in file_paths:
+        normalized = normalize_rel_path(path)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(normalized)
+
+    if read_profile.get('name') == 'generic':
+        return deduped
+
+    preferred = []
+    used = set()
+
+    def add_path(path: str) -> None:
+        normalized = normalize_rel_path(path)
+        if not normalized or normalized in used or normalized not in seen:
+            return
+        used.add(normalized)
+        preferred.append(normalized)
+
+    for path in deduped:
+        lowered = path.lower()
+        if any(token in lowered for token in read_profile.get('focusManagerTokens', set())):
+            add_path(path)
+
+    for path in snapshot.get('summary', {}).get('entryPoints', []):
+        lowered = normalize_rel_path(path).lower()
+        if any(lowered.endswith(suffix) for suffix in read_profile.get('focusEntrySuffixes', set())):
+            add_path(path)
+
+    for path in deduped:
+        lowered = path.lower()
+        if any(lowered.endswith(suffix) for suffix in read_profile.get('focusEntrySuffixes', set())):
+            add_path(path)
+
+    remainder = [
+        path for path in deduped
+        if path not in used and not is_suppressed_by_profile(path, query_intent, read_profile)
+    ]
+    return preferred + remainder
 
 
 def infer_query_intent(query: str | None) -> dict:
@@ -1758,10 +2127,13 @@ infer_query_intent = infer_query_intent_framework
 infer_query_intent_v2 = infer_query_intent_framework
 
 
-def rerank_read_matches(matches: list[dict], query_intent: dict) -> list[dict]:
+def rerank_read_matches(matches: list[dict], query_intent: dict, read_profile: dict | None = None) -> list[dict]:
+    read_profile = read_profile or select_read_profile(query_intent)
     labels = set(query_intent.get('labels', []))
     query_terms = set(query_intent.get('keywords', []))
+    exact_terms = set(query_intent.get('terms', []))
     action_terms = query_terms & GENERAL_QUERY_ACTION_TERMS
+    exact_action_terms = exact_terms & GENERAL_QUERY_ACTION_TERMS
     reranked = []
 
     for item in matches:
@@ -1769,13 +2141,15 @@ def rerank_read_matches(matches: list[dict], query_intent: dict) -> list[dict]:
         path = (item.get('path') or '').lower()
         kind = (item.get('kind') or '').lower()
         preview = (item.get('preview') or '').lower()
+        preview_head = preview.splitlines()[0] if preview else ''
         signals = ' '.join(item.get('signals', [])).lower()
         haystack = ' '.join([path, kind, preview, signals])
         haystack_terms = set(extract_text_terms(haystack))
+        symbol_terms = set(extract_text_terms(preview_head))
 
         if path.startswith('src/') or path.startswith('app/') or path.startswith('server/'):
             bonus += 12
-        if any(token in path for token in ['/docs/', 'readme', 'skill.md', 'prompt', '/rules/']):
+        if query_terms and any(token in path for token in ['/docs/', 'readme', 'skill.md', 'prompt', '/rules/']):
             bonus -= 18
         if (path.startswith('scripts/') or '/scripts/' in path) and not (query_terms & {'script', 'setup', 'build', 'cli'}):
             bonus -= 10
@@ -1823,14 +2197,59 @@ def rerank_read_matches(matches: list[dict], query_intent: dict) -> list[dict]:
         keyword_overlap = len(haystack_terms & query_terms)
         if keyword_overlap:
             bonus += min(keyword_overlap, 4) * 6
+        exact_overlap = len(haystack_terms & exact_terms)
+        if exact_overlap:
+            bonus += min(exact_overlap, 3) * 12
+        exact_symbol_overlap = len(symbol_terms & exact_terms)
+        if exact_symbol_overlap:
+            bonus += min(exact_symbol_overlap, 2) * 18
 
         if action_terms and haystack_terms & action_terms:
             bonus += 14
+        if exact_action_terms and haystack_terms & exact_action_terms:
+            bonus += 18
+        if exact_action_terms and symbol_terms & exact_action_terms:
+            bonus += 20
+
+        bonus += score_match_with_profile(path, symbol_terms, query_intent, read_profile)
 
         reranked.append((item.get('score', 0) + bonus, item))
 
     reranked.sort(key=lambda pair: (-pair[0], pair[1].get('path') or '', pair[1].get('startLine') or 0))
     return [item for _, item in reranked]
+
+
+def score_match_with_profile(path: str, symbol_terms: set[str], query_intent: dict, read_profile: dict) -> int:
+    lowered = normalize_rel_path(path).lower()
+    exact_terms = set(query_intent.get('terms', []))
+    bonus = 0
+
+    for token in read_profile.get('focusManagerTokens', set()):
+        if token in lowered:
+            bonus += 32
+
+    for suffix in read_profile.get('focusEntrySuffixes', set()):
+        if lowered.endswith('/' + suffix) or lowered.endswith(suffix):
+            bonus += 16
+
+    if is_suppressed_by_profile(path, query_intent, read_profile):
+        if '/libs/' in lowered:
+            bonus -= 18
+        if lowered.startswith('scripts/') or '/scripts/' in lowered:
+            bonus -= 24
+
+    boosted_terms = read_profile.get('boostSymbolTerms', set())
+    if boosted_terms and symbol_terms & boosted_terms:
+        bonus += 24
+
+    penalized_terms = read_profile.get('penalizeSymbolTerms', set())
+    if penalized_terms and symbol_terms & penalized_terms and not (symbol_terms & boosted_terms):
+        bonus -= 10
+
+    if 'download' in exact_terms and 'download' in symbol_terms:
+        bonus += 24
+
+    return bonus
 
 
 def build_read_file_entries(
@@ -1962,12 +2381,44 @@ def infer_read_file_reason(path: str, snippet: dict, hotspot: dict, indexed: dic
     return ', '.join(deduped[:3])
 
 
-def build_read_snippets(snippet_items: list[dict], representative_snippets: list[dict]) -> list[dict]:
+def focus_preview_on_query(preview: str | None, query_intent: dict) -> str | None:
+    if not preview:
+        return preview
+
+    exact_terms = set(query_intent.get('terms', []))
+    keyword_terms = set(query_intent.get('keywords', []))
+    if not exact_terms and not keyword_terms:
+        return preview
+
+    lines = preview.splitlines()
+    if len(lines) <= 1:
+        return preview
+
+    best_index = 0
+    best_score = 0
+    for index, line in enumerate(lines):
+        line_terms = set(extract_text_terms(line))
+        score = len(line_terms & keyword_terms) + len(line_terms & exact_terms) * 2
+        if score > best_score:
+            best_index = index
+            best_score = score
+
+    if best_score <= 0 or best_index == 0:
+        return preview
+
+    return '\n'.join(lines[best_index:]).strip()
+
+
+def build_read_snippets(
+    snippet_items: list[dict],
+    representative_snippets: list[dict],
+    query_intent: dict,
+) -> list[dict]:
     snippets = []
     seen = set()
 
     for item in snippet_items[:10]:
-        preview = item.get('preview') or item.get('snippet')
+        preview = focus_preview_on_query(item.get('preview') or item.get('snippet'), query_intent)
         path = item.get('path')
         start_line = item.get('startLine')
         end_line = item.get('endLine')
@@ -1992,7 +2443,8 @@ def build_read_snippets(snippet_items: list[dict], representative_snippets: list
         return snippets
 
     for item in representative_snippets[:8]:
-        key = (item.get('path'), item.get('startLine'), item.get('endLine'), item.get('snippet'))
+        preview = focus_preview_on_query(item.get('snippet'), query_intent)
+        key = (item.get('path'), item.get('startLine'), item.get('endLine'), preview)
         if key in seen:
             continue
         seen.add(key)
@@ -2001,7 +2453,7 @@ def build_read_snippets(snippet_items: list[dict], representative_snippets: list
             'kind': 'representative',
             'startLine': item.get('startLine'),
             'endLine': item.get('endLine'),
-            'preview': item.get('snippet'),
+            'preview': preview,
             'signals': [],
             'score': None,
             'whyMatched': item.get('reason'),
@@ -2794,7 +3246,7 @@ def read_query_input(
 def main():
     if len(sys.argv) < 2:
         print(
-            "Usage: python generate.py <project_path> [read|--read] [--force] "
+            "Usage: python generate.py <project_path> [read|--read|report|--report] [--force] "
             "[--task <task>] [--query <query> | --query-escaped <ascii_escaped_query> "
             "| --query-file <utf8_file> | --query-stdin]",
             file=sys.stderr,
@@ -2804,6 +3256,7 @@ def main():
     project_path = sys.argv[1]
     cli_args = sys.argv[2:]
     read_mode = '--read' in cli_args or (len(cli_args) > 0 and cli_args[0] == 'read')
+    report_mode = '--report' in cli_args or (len(cli_args) > 0 and cli_args[0] == 'report')
     force = '--force' in cli_args or '--refresh' in cli_args or (len(cli_args) > 0 and cli_args[0] == 'refresh')
     task = 'understand-project'
     query = None
@@ -2840,6 +3293,16 @@ def main():
     except FileNotFoundError as error:
         print(f"Error: {error}", file=sys.stderr)
         sys.exit(1)
+
+    if report_mode:
+        base = Path(project_path)
+        snapshot = load_existing_snapshot(base / 'repo' / 'progress' / 'miloya-codebase.json')
+        if not snapshot or force:
+            snapshot = generate_snapshot(project_path, force)
+
+        index_state = load_existing_index_state(base / 'repo' / 'progress' / 'miloya-codebase.index.json')
+        write_json_stdout(build_report_payload(snapshot, index_state, task, query))
+        return
 
     if read_mode:
         base = Path(project_path)
