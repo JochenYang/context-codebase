@@ -10,6 +10,12 @@ STOPWORDS = {
     'files', 'repo', 'project', 'understand', 'task', 'mode', 'need', 'use',
 }
 
+ACTION_QUERY_TOKENS = {
+    'download', 'install', 'delete', 'remove', 'load', 'sync', 'start',
+    'stop', 'dispatch', 'route', 'reply', 'send', 'receive', 'create',
+    'update', 'fetch', 'clone', 'import', 'export', 'connect',
+}
+
 
 TASK_BLUEPRINTS = {
     'understand-project': {
@@ -103,7 +109,7 @@ def build_context_pack(
         'description': description,
         'query': query,
         'chunks': ranked,
-        'files': sorted(dict.fromkeys(related_files))[:12],
+        'files': list(dict.fromkeys(related_files))[:12],
     }
 
 
@@ -196,6 +202,11 @@ def score_chunk(
         score += len(overlap) * 12
         reasons.append(f'keyword overlap: {", ".join(overlap[:4])}')
 
+    action_overlap = query_tokens & ACTION_QUERY_TOKENS
+    if action_overlap and chunk.get('kind') == 'action-flow':
+        score += 20
+        reasons.append('operation anchor')
+
     path_rank = important_ranks.get(chunk['path'])
     if path_rank is not None:
         score += max(0, 30 - path_rank * 3)
@@ -209,7 +220,7 @@ def score_chunk(
     if task == 'understand-project' and chunk['kind'] in {'section', 'model', 'function'}:
         score += 10
         reasons.append('orientation chunk')
-    if task == 'feature-delivery' and chunk['kind'] in {'route', 'function', 'model'}:
+    if task == 'feature-delivery' and chunk['kind'] in {'route', 'function', 'model', 'action-flow'}:
         score += 12
         reasons.append('implementation anchor')
     if task == 'bugfix-investigation' and chunk['kind'] in {'route', 'function'}:

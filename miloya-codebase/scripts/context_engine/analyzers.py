@@ -10,6 +10,7 @@ from pathlib import Path
 
 HTTP_METHODS = {'get', 'post', 'put', 'delete', 'patch', 'head', 'options'}
 TS_EXTENSIONS = {'.ts', '.tsx', '.js', '.jsx'}
+LOCAL_IMPORT_ROOTS = {'src', 'app', 'components', 'lib', 'libs', 'shared', 'utils', 'services', 'stores', 'modules'}
 
 
 @dataclass
@@ -92,7 +93,7 @@ class PythonAstAnalyzer:
         if explicit_all:
             exports = {name for name in exports if name in explicit_all}
 
-        result.imports = sorted(imports)[:8]
+        result.imports = _prioritize_imports(imports)
         result.exports = sorted(exports)[:8]
         result.api_routes = routes
         result.data_models = models
@@ -154,7 +155,7 @@ class JavaScriptAnalyzer:
             return None
 
         return FileAnalysis(
-            imports=payload.get('imports', [])[:8],
+            imports=_prioritize_imports(payload.get('imports', [])),
             exports=payload.get('exports', [])[:8],
             api_routes=payload.get('apiRoutes', []),
             data_models=payload.get('dataModels', []),
@@ -306,7 +307,7 @@ def _regex_python_analysis(content: str, rel_path: str, result: FileAnalysis) ->
 
     imports = set(re.findall(r'^\s*from\s+([A-Za-z0-9_\.]+)\s+import', cleaned, flags=re.MULTILINE))
     imports.update(re.findall(r'^\s*import\s+([A-Za-z0-9_\.]+)', cleaned, flags=re.MULTILINE))
-    result.imports = sorted(imports)[:8]
+    result.imports = _prioritize_imports(imports)
 
     exports = set(re.findall(r'^\s*(?:async\s+)?def\s+([A-Za-z_]\w*)\s*\(', cleaned, flags=re.MULTILINE))
     exports.update(re.findall(r'^\s*class\s+([A-Za-z_]\w*)', cleaned, flags=re.MULTILINE))
@@ -348,7 +349,7 @@ def _regex_typescript_analysis(content: str, rel_path: str, result: FileAnalysis
 
     imports = set(re.findall(r'import\s+.*?\s+from\s+[\'"]([^\'"]+)[\'"]', cleaned))
     imports.update(re.findall(r'require\(\s*[\'"]([^\'"]+)[\'"]\s*\)', cleaned))
-    result.imports = sorted(imports)[:8]
+    result.imports = _prioritize_imports(imports)
 
     exports = set(re.findall(r'export\s+(?:async\s+)?function\s+(\w+)', cleaned))
     exports.update(re.findall(r'export\s+class\s+(\w+)', cleaned))
@@ -401,6 +402,22 @@ def _framework_hints_from_js_import(import_name: str) -> set[str]:
         'svelte': 'Svelte',
     }
     return {mapping[import_name]} if import_name in mapping else set()
+
+
+def _prioritize_imports(imports: list[str] | set[str], limit: int = 24) -> list[str]:
+    def sort_key(import_name: str) -> tuple[int, str]:
+        return (0 if _is_localish_import(import_name) else 1, import_name)
+
+    normalized = [item for item in imports if isinstance(item, str) and item]
+    return sorted(set(normalized), key=sort_key)[:limit]
+
+
+def _is_localish_import(import_name: str) -> bool:
+    if import_name.startswith(('.', '/', '@/', '~/')):
+        return True
+
+    head = import_name.split('/', 1)[0]
+    return head in LOCAL_IMPORT_ROOTS
 
 
 def _line_number_for_offset(content: str, offset: int) -> int:

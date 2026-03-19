@@ -22,6 +22,12 @@ EXTERNAL_CONTEXT = importlib.util.module_from_spec(EXTERNAL_CONTEXT_SPEC)
 assert EXTERNAL_CONTEXT_SPEC.loader is not None
 EXTERNAL_CONTEXT_SPEC.loader.exec_module(EXTERNAL_CONTEXT)
 
+GRAPH_PATH = Path(__file__).resolve().parents[1] / "scripts" / "context_engine" / "graph.py"
+GRAPH_SPEC = importlib.util.spec_from_file_location("miloya_graph", GRAPH_PATH)
+GRAPH = importlib.util.module_from_spec(GRAPH_SPEC)
+assert GRAPH_SPEC.loader is not None
+GRAPH_SPEC.loader.exec_module(GRAPH)
+
 
 class FailingStdout:
     def __init__(self) -> None:
@@ -128,24 +134,20 @@ class GenerateSnapshotTests(unittest.TestCase):
         self.assertIn("chunkCatalog", snapshot)
         self.assertIn("graph", snapshot)
         self.assertIn("retrieval", snapshot)
-        self.assertIn("contextPacks", snapshot)
-        self.assertIn("externalContext", snapshot)
-        self.assertIn("importantFiles", snapshot)
-        self.assertIn("representativeSnippets", snapshot)
-        self.assertIn("contextHints", snapshot)
-        self.assertIsInstance(snapshot["importantFiles"], list)
-        self.assertTrue(snapshot["importantFiles"])
-        self.assertTrue(snapshot["chunkCatalog"])
-        self.assertEqual(snapshot["freshness"]["stale"], False)
-        self.assertEqual(snapshot["workspace"]["rootManifests"], ["package.json"])
-        self.assertIn("package.json", [item["path"] for item in snapshot["importantFiles"]])
-        self.assertEqual(snapshot["analysis"]["engines"]["Python"], "python-ast")
-        self.assertEqual(snapshot["index"]["fileCount"], 5)
-        self.assertGreater(snapshot["index"]["chunkCount"], 0)
-        self.assertIn("understand-project", snapshot["contextPacks"])
-        self.assertTrue(snapshot["graph"]["stats"]["symbols"] > 0)
-        self.assertIn("understand-project", snapshot["retrieval"]["availableTasks"])
-        self.assertIn("README.md", snapshot["externalContext"]["documentationSources"])
+
+    def test_read_query_input_prefers_utf8_query_file(self) -> None:
+        query_file = self.temp_dir / "query.txt"
+        query_file.write_text("技能管理器如何实现", encoding="utf-8")
+
+        value = GENERATE.read_query_input(None, None, str(query_file), False)
+
+        self.assertEqual(value, "技能管理器如何实现")
+
+    def test_read_query_input_can_read_stdin(self) -> None:
+        with patch("sys.stdin", io.StringIO("中文查询\n")):
+            value = GENERATE.read_query_input(None, None, None, True)
+
+        self.assertEqual(value, "中文查询")
 
     def test_snapshot_writes_index_state_with_chunks(self) -> None:
         GENERATE.generate_snapshot(str(self.temp_dir), force=True)
@@ -177,6 +179,368 @@ class GenerateSnapshotTests(unittest.TestCase):
         self.assertTrue(pack["matches"])
         self.assertIn("src/app.py", pack["files"])
 
+    def test_read_payload_uses_snapshot_and_returns_file_guides(self) -> None:
+        snapshot = GENERATE.generate_snapshot(str(self.temp_dir), force=True)
+        index_state = GENERATE.load_existing_index_state(
+            self.temp_dir / "repo" / "progress" / "miloya-codebase.index.json"
+        )
+
+        payload = GENERATE.build_read_payload(
+            snapshot=snapshot,
+            index_state=index_state,
+            task="understand-project",
+            query=None,
+        )
+
+        self.assertEqual(payload["mode"], "read")
+        self.assertEqual(payload["task"], "understand-project")
+        self.assertTrue(payload["files"])
+        self.assertTrue(payload["snippets"])
+        self.assertIn("availableTasks", payload)
+        self.assertIn("recommendedStart", payload["quickStart"])
+        self.assertTrue(any(item["path"] == "README.md" for item in payload["files"]))
+
+    def test_read_payload_query_returns_snippets_with_line_ranges(self) -> None:
+        snapshot = GENERATE.generate_snapshot(str(self.temp_dir), force=True)
+        index_state = GENERATE.load_existing_index_state(
+            self.temp_dir / "repo" / "progress" / "miloya-codebase.index.json"
+        )
+
+        payload = GENERATE.build_read_payload(
+            snapshot=snapshot,
+            index_state=index_state,
+            task="feature-delivery",
+            query="fastapi real route",
+        )
+
+        self.assertEqual(payload["mode"], "read")
+        self.assertEqual(payload["task"], "feature-delivery")
+        self.assertEqual(payload["query"], "fastapi real route")
+        self.assertTrue(payload["snippets"])
+        self.assertTrue(any(item["path"] == "src/app.py" for item in payload["files"]))
+        self.assertTrue(any(item["startLine"] <= item["endLine"] for item in payload["snippets"]))
+
+    def test_read_payload_query_includes_scope_and_next_hops(self) -> None:
+        snapshot = GENERATE.generate_snapshot(str(self.temp_dir), force=True)
+        index_state = GENERATE.load_existing_index_state(
+            self.temp_dir / "repo" / "progress" / "miloya-codebase.index.json"
+        )
+
+        payload = GENERATE.build_read_payload(
+            snapshot=snapshot,
+            index_state=index_state,
+            task="feature-delivery",
+            query="config guide type",
+        )
+
+        self.assertIn("queryIntent", payload)
+        self.assertIn("configuration", payload["queryIntent"]["labels"])
+        self.assertIn("documentation-link", payload["queryIntent"]["labels"])
+        self.assertIn("type-definition", payload["queryIntent"]["labels"])
+        self.assertIn("searchScope", payload)
+        self.assertIn("repo/progress/", payload["searchScope"]["excludePaths"])
+        self.assertIn("nextHops", payload)
+        self.assertTrue(isinstance(payload["nextHops"], list))
+
+    def test_query_intent_recognizes_generic_flow_intents_even_with_mojibake_noise(self) -> None:
+        intent = GENERATE.infer_query_intent("IM gateway im���� ��ϢͶ�� ·�� delivery route")
+
+        self.assertIn("integration-flow", intent["labels"])
+        self.assertIn("routing-flow", intent["labels"])
+        self.assertIn("gateway", intent["keywords"])
+        self.assertIn("delivery", intent["keywords"])
+
+    def test_query_intent_expands_mixed_language_flow_terms(self) -> None:
+        intent = GENERATE.infer_query_intent("skill\u4e0b\u8f7d\u6d41\u7a0b\u600e\u4e48\u5b9e\u73b0")
+
+        self.assertIn("runtime-flow", intent["labels"])
+        self.assertIn("skill", intent["keywords"])
+        self.assertIn("下载", intent["keywords"])
+        self.assertIn("download", intent["keywords"])
+        self.assertIn("流程", intent["terms"])
+
+    def test_read_payload_query_can_hit_config_links_and_persist_flows(self) -> None:
+        (self.temp_dir / "src" / "IMSettings.tsx").write_text(
+            "\n".join(
+                [
+                    "const IM_GUIDE_URLS = {",
+                    "  feishu: 'https://example.com/feishu-guide',",
+                    "};",
+                    "",
+                    "async function handleSaveFeishuConfig() {",
+                    "  await imService.persistConfig({ feishu: { enabled: true } });",
+                    "}",
+                    "",
+                    "export function IMSettings() {",
+                    "  return <GuideCard guideUrl={IM_GUIDE_URLS.feishu} />;",
+                    "}",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        snapshot = GENERATE.generate_snapshot(str(self.temp_dir), force=True)
+        index_state = GENERATE.load_existing_index_state(
+            self.temp_dir / "repo" / "progress" / "miloya-codebase.index.json"
+        )
+
+        payload = GENERATE.build_read_payload(
+            snapshot=snapshot,
+            index_state=index_state,
+            task="feature-delivery",
+            query="feishu config guide link",
+        )
+
+        self.assertTrue(any(item["path"] == "src/IMSettings.tsx" for item in payload["files"]))
+        self.assertTrue(any(item["path"] == "src/IMSettings.tsx" for item in payload["snippets"]))
+        matched_file = next(item for item in payload["files"] if item["path"] == "src/IMSettings.tsx")
+        self.assertEqual(matched_file["language"], "TypeScript")
+        self.assertEqual(matched_file["lines"], 11)
+        self.assertEqual(matched_file["role"], "UI component")
+        self.assertTrue(isinstance(matched_file["whyImportant"], str))
+
+    def test_gateway_query_returns_compact_payload_with_flow_anchors(self) -> None:
+        (self.temp_dir / "src" / "imGatewayManager.ts").write_text(
+            "\n".join(
+                [
+                    "export function routeChannelMessage() {",
+                    "  return 'gateway';",
+                    "}",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (self.temp_dir / "src" / "imDeliveryRoute.ts").write_text(
+            "\n".join(
+                [
+                    "export function resolveDeliveryRoute() {",
+                    "  return 'route';",
+                    "}",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (self.temp_dir / "src" / "imChatHandler.ts").write_text(
+            "\n".join(
+                [
+                    "export function handleGatewayMessage() {",
+                    "  return 'chat';",
+                    "}",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        snapshot = GENERATE.generate_snapshot(str(self.temp_dir), force=True)
+        index_state = GENERATE.load_existing_index_state(
+            self.temp_dir / "repo" / "progress" / "miloya-codebase.index.json"
+        )
+
+        payload = GENERATE.build_read_payload(
+            snapshot=snapshot,
+            index_state=index_state,
+            task="feature-delivery",
+            query="IM gateway delivery route",
+        )
+
+        self.assertIn("integration-flow", payload["queryIntent"]["labels"])
+        self.assertIn("routing-flow", payload["queryIntent"]["labels"])
+        self.assertLessEqual(len(payload["files"]), 8)
+        self.assertLessEqual(len(payload["snippets"]), 6)
+        self.assertIn("flowAnchors", payload)
+        self.assertTrue(payload["flowAnchors"])
+        self.assertTrue(any(item["path"] == "src/imGatewayManager.ts" for item in payload["files"]))
+        self.assertTrue(any(item["type"] in {"manager", "routing", "handler", "integration"} for item in payload["flowAnchors"]))
+
+    def test_action_flow_query_prefers_operation_anchor(self) -> None:
+        (self.temp_dir / "src" / "skillManager.ts").write_text(
+            "\n".join(
+                [
+                    "export async function downloadSkill(source: string) {",
+                    "  return source;",
+                    "}",
+                    "",
+                    "export function listSkills() {",
+                    "  return [];",
+                    "}",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (self.temp_dir / "src" / "runtimeAdapter.ts").write_text(
+            "\n".join(
+                [
+                    "export function startRuntime() {",
+                    "  return 'runtime';",
+                    "}",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        snapshot = GENERATE.generate_snapshot(str(self.temp_dir), force=True)
+        index_state = GENERATE.load_existing_index_state(
+            self.temp_dir / "repo" / "progress" / "miloya-codebase.index.json"
+        )
+
+        payload = GENERATE.build_read_payload(
+            snapshot=snapshot,
+            index_state=index_state,
+            task="feature-delivery",
+            query="skill download flow",
+        )
+
+        self.assertEqual(payload["files"][0]["path"], "src/skillManager.ts")
+        self.assertEqual(payload["snippets"][0]["path"], "src/skillManager.ts")
+        self.assertIn(payload["snippets"][0]["kind"], {"action-flow", "function"})
+        self.assertTrue(any(anchor["type"] == "operation" for anchor in payload["flowAnchors"]))
+
+    def test_runtime_query_returns_follow_up_paths(self) -> None:
+        snapshot = {
+            "summary": {
+                "entryPoints": [
+                    "src/main/main.ts",
+                    "src/main/preload.ts",
+                    "src/main/libs/agentEngine/index.ts",
+                ]
+            },
+            "importantFiles": [
+                {
+                    "path": "src/main/skillManager.ts",
+                    "role": "Runtime / integration",
+                    "whyImportant": "coordinates skill lifecycle",
+                },
+                {
+                    "path": "src/main/libs/openclawConfigSync.ts",
+                    "role": "Runtime / integration",
+                    "whyImportant": "syncs runtime config",
+                },
+            ],
+            "graph": {
+                "fileDependencies": [],
+                "pathIndex": [
+                    {
+                        "module": "src/",
+                        "files": [
+                            {"path": "src/main/main.ts"},
+                            {"path": "src/main/preload.ts"},
+                            {"path": "src/main/skillManager.ts"},
+                            {"path": "src/main/libs/openclawConfigSync.ts"},
+                        ],
+                    }
+                ],
+            },
+        }
+
+        next_hops = GENERATE.build_read_next_hops(
+            snapshot=snapshot,
+            file_paths=[
+                "src/main/libs/agentEngine/openclawRuntimeAdapter.ts",
+                "src/main/skillManager.ts",
+            ],
+            snippet_items=[
+                {"path": "src/main/libs/agentEngine/openclawRuntimeAdapter.ts"},
+            ],
+            query_intent=GENERATE.infer_query_intent("skill lifecycle runtime"),
+        )
+
+        self.assertTrue(next_hops)
+        self.assertTrue(any(item["reason"] == "runtime flow follow-up" for item in next_hops))
+
+    def test_graph_resolves_tsconfig_path_aliases(self) -> None:
+        (self.temp_dir / "tsconfig.json").write_text(
+            json.dumps(
+                {
+                    "compilerOptions": {
+                        "baseUrl": ".",
+                        "paths": {
+                            "@/*": ["src/*"],
+                        },
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        (self.temp_dir / "src" / "shared").mkdir(parents=True, exist_ok=True)
+        (self.temp_dir / "src" / "main").mkdir(parents=True, exist_ok=True)
+        (self.temp_dir / "src" / "shared" / "util.ts").write_text(
+            "export const util = () => 'ok';",
+            encoding="utf-8",
+        )
+        (self.temp_dir / "src" / "main" / "feature.ts").write_text(
+            "\n".join(
+                [
+                    "import React from 'react';",
+                    "import express from 'express';",
+                    "import fs from 'fs';",
+                    "import path from 'path';",
+                    "import os from 'os';",
+                    "import http from 'http';",
+                    "import yaml from 'js-yaml';",
+                    "import lodash from 'lodash';",
+                    "import { util } from '@/shared/util';",
+                    "export const runFeature = () => util();",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        snapshot = GENERATE.generate_snapshot(str(self.temp_dir), force=True)
+
+        dependency_map = {
+            item["path"]: item["dependsOn"]
+            for item in snapshot["graph"]["fileDependencies"]
+        }
+        self.assertIn("src/main/feature.ts", dependency_map)
+        self.assertIn("src/shared/util.ts", dependency_map["src/main/feature.ts"])
+        self.assertTrue(
+            any(
+                edge["source"] == "src/main/" and edge["target"] == "src/shared/"
+                for edge in snapshot["graph"]["moduleDependencies"]
+            )
+        )
+
+    def test_next_hops_infers_role_for_non_important_files(self) -> None:
+        snapshot = {
+            "summary": {
+                "entryPoints": [
+                    "src/main/main.ts",
+                ]
+            },
+            "importantFiles": [],
+            "graph": {
+                "fileDependencies": [],
+                "hotspots": [
+                    {
+                        "path": "src/main/services/pluginManager.ts",
+                        "inbound": 2,
+                        "outbound": 1,
+                        "signals": 3,
+                    }
+                ],
+                "pathIndex": [
+                    {
+                        "module": "src/main/",
+                        "files": [
+                            {"path": "src/main/services/pluginManager.ts"},
+                        ],
+                    }
+                ],
+            },
+        }
+
+        next_hops = GENERATE.build_read_next_hops(
+            snapshot=snapshot,
+            file_paths=["src/main/runtime.ts"],
+            snippet_items=[],
+            query_intent=GENERATE.infer_query_intent("runtime lifecycle manager"),
+        )
+
+        self.assertTrue(next_hops)
+        plugin_manager = next(item for item in next_hops if item["path"] == "src/main/services/pluginManager.ts")
+        self.assertEqual(plugin_manager["role"], "Runtime / integration")
+        self.assertTrue(isinstance(plugin_manager["whyImportant"], str))
+
     def test_external_context_handles_non_utf8_git_output(self) -> None:
         commit_stdout = "abc123\x1f2026-03-18T12:00:00+08:00\x1ffeature ".encode("gb18030") + b"\xae\n"
         changed_stdout = "src\\app.py\nREADME.md\n".encode("utf-8")
@@ -200,6 +564,16 @@ class GenerateSnapshotTests(unittest.TestCase):
         self.assertEqual(context["recentCommits"][0]["hash"], "abc123")
         self.assertEqual(context["recentChangedFiles"], ["src/app.py", "README.md"])
         self.assertTrue(isinstance(context["recentCommits"][0]["summary"], str))
+
+    def test_decode_subprocess_output_accepts_memoryview_payload(self) -> None:
+        payload = memoryview("技能管理器".encode("utf-8"))
+
+        decoded = EXTERNAL_CONTEXT.decode_subprocess_output(payload)
+
+        self.assertEqual(decoded, "技能管理器")
+
+    def test_graph_module_for_path_handles_empty_string(self) -> None:
+        self.assertEqual(GRAPH.module_for_path(""), "./")
 
     def test_ast_analysis_detects_async_python_functions_and_dataclasses(self) -> None:
         snapshot = GENERATE.generate_snapshot(str(self.temp_dir), force=True)
@@ -274,6 +648,11 @@ class GenerateSnapshotTests(unittest.TestCase):
         self.assertIn(("POST", "/real"), {(item["method"], item["path"]) for item in second["apiRoutes"]})
         self.assertEqual(second["index"]["delta"]["changedFiles"], 1)
         self.assertFalse(second["index"]["reusedSnapshot"])
+
+    def test_read_query_input_can_decode_escaped_query(self) -> None:
+        value = GENERATE.read_query_input(None, "\\u6280\\u80fd\\u4e0b\\u8f7d\\u6d41\\u7a0b", None, False)
+
+        self.assertEqual(value, "技能下载流程")
 
 
 if __name__ == "__main__":

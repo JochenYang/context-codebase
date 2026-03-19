@@ -10,6 +10,7 @@ import os
 import re
 import subprocess
 import sys
+import codecs
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -792,6 +793,7 @@ def build_chunks(file_records: list[dict]) -> list[dict]:
                 anchor_lines.append((line_no, 'model', [model.get('type', ''), model.get('name', '')]))
         for func in record.get('keyFunctions', []):
             anchor_lines.append((func['line'], 'function', [func['name']]))
+        anchor_lines.extend(build_semantic_anchor_lines(record, lines))
 
         if anchor_lines:
             seen_ranges = set()
@@ -836,6 +838,80 @@ def build_chunks(file_records: list[dict]) -> list[dict]:
             window_start = window_end + 1
 
     return chunks
+
+
+def build_semantic_anchor_lines(record: dict, lines: list[str]) -> list[tuple[int, str, list[str]]]:
+    language = record.get('language')
+    if language not in {'TypeScript', 'JavaScript', 'TSX', 'JSX', 'Python'}:
+        return []
+
+    anchors: list[tuple[int, str, list[str]]] = []
+    seen_lines = set()
+    action_tokens = [
+        'download',
+        'install',
+        'delete',
+        'remove',
+        'load',
+        'sync',
+        'start',
+        'stop',
+        'dispatch',
+        'route',
+        'reply',
+        'send',
+        'receive',
+        'create',
+        'update',
+        'fetch',
+        'clone',
+        'import',
+        'export',
+        'connect',
+    ]
+    patterns = [
+        (r'https?://', 'link', ['url', 'link']),
+        (r'\bguideUrl\b|\b[A-Z0-9_]*GUIDE[A-Z0-9_]*\b', 'link', ['guide', 'url']),
+        (r'\b(persistConfig|updateConfig|save\w*Config|set\w+Config)\b', 'config-flow', ['config', 'persist']),
+        (r'\b(interface|type|class)\s+\w*Config\b', 'config-type', ['config', 'type']),
+    ]
+
+    def match_action_declaration(line: str) -> str | None:
+        patterns = [
+            r'^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\(',
+            r'^\s*(?:export\s+)?(?:const|let|var)\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:async\s+)?(?:\([^)]*\)|[A-Za-z_][A-Za-z0-9_]*)\s*=>',
+            r'^\s*(?:export\s+)?(?:const|let|var)\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:async\s+)?function\s*\(',
+            r'^\s*(?:public\s+|private\s+|protected\s+|static\s+|async\s+)*(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\([^;]*\)\s*\{',
+            r'^\s*(?:async\s+def|def)\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\(',
+        ]
+        for pattern in patterns:
+            matched = re.match(pattern, line)
+            if not matched:
+                continue
+            name = matched.group('name').lower()
+            if any(token in name for token in action_tokens):
+                return name
+        return None
+
+    for line_number, line in enumerate(lines, start=1):
+        if len(anchors) >= 12:
+            break
+
+        declaration_name = match_action_declaration(line)
+        if declaration_name and line_number not in seen_lines:
+            seen_lines.add(line_number)
+            action = next((token for token in action_tokens if token in declaration_name), 'operation')
+            anchors.append((line_number, 'action-flow', [action, 'operation']))
+
+        for pattern, kind, signals in patterns:
+            if re.search(pattern, line):
+                if line_number in seen_lines:
+                    break
+                seen_lines.add(line_number)
+                anchors.append((line_number, kind, signals))
+                break
+
+    return anchors
 
 
 def build_markdown_chunks(record: dict, lines: list[str]) -> list[dict]:
@@ -1118,24 +1194,1120 @@ def build_focus_context_pack(
     external_context = snapshot.get('externalContext', {})
     important_ranks = {item['path']: index for index, item in enumerate(important_files)}
     recent_changed = set(external_context.get('recentChangedFiles', []))
+    query_intent = infer_query_intent(query)
+    expanded_query_terms = list(dict.fromkeys([
+        *query_intent.get('terms', []),
+        *query_intent.get('keywords', []),
+    ]))
+    expanded_query = ' '.join(expanded_query_terms) or query
     file_dependency_map = {
         item['path']: item['dependsOn']
         for item in graph.get('fileDependencies', [])
     }
     matches = retrieve_chunks(
-        query=query,
+        query=expanded_query,
         chunks=chunks,
         important_ranks=important_ranks,
         recent_changed=recent_changed,
         file_dependency_map=file_dependency_map,
         task=task,
-        limit=12,
+        limit=24,
     )
+    matches = rerank_read_matches(matches, query_intent)[:12]
+    related_paths = []
+    for match in matches:
+        related_paths.append(match['path'])
+        related_paths.extend(file_dependency_map.get(match['path'], []))
+
     return {
         'task': task,
         'query': query,
         'matches': matches,
-        'files': sorted(dict.fromkeys(match['path'] for match in matches)),
+        'files': list(dict.fromkeys(related_paths))[:12],
+    }
+
+
+def build_read_payload(
+    snapshot: dict,
+    index_state: dict | None,
+    task: str,
+    query: str | None,
+) -> dict:
+    normalized_query = normalize_query_text(query)
+    retrieval = snapshot.get('retrieval', {})
+    available_tasks = retrieval.get('availableTasks', [])
+    selected_task = task if task in available_tasks else retrieval.get('defaultTask', 'understand-project')
+    quick_start = snapshot.get('contextHints', {})
+    graph = snapshot.get('graph', {})
+    important_files = snapshot.get('importantFiles', [])
+    representative_snippets = snapshot.get('representativeSnippets', [])
+    query_intent = infer_query_intent(normalized_query)
+    read_limits = determine_read_limits(query_intent)
+
+    if normalized_query:
+        focus_pack = build_focus_context_pack(normalized_query, selected_task, snapshot, index_state)
+        snippet_items = (focus_pack or {}).get('matches', [])
+        file_paths = (focus_pack or {}).get('files', [])
+        task_description = describe_task(snapshot, selected_task)
+    else:
+        task_pack = snapshot.get('contextPacks', {}).get(selected_task, {})
+        snippet_items = task_pack.get('chunks', [])
+        file_paths = build_default_read_paths(snapshot, task_pack)
+        task_description = task_pack.get('description') or describe_task(snapshot, selected_task)
+
+    file_paths = prioritize_read_file_paths(file_paths, snippet_items, query_intent)
+
+    return {
+        'mode': 'read',
+        'task': selected_task,
+        'query': normalized_query,
+        'snapshotPath': snapshot.get('freshness', {}).get('snapshotPath'),
+        'sourceFingerprint': snapshot.get('sourceFingerprint'),
+        'freshness': snapshot.get('freshness'),
+        'analysis': snapshot.get('analysis'),
+        'quickStart': {
+            'recommendedStart': quick_start.get('recommendedStart'),
+            'readOrder': quick_start.get('readOrder', [])[:8],
+            'highSignalAreas': quick_start.get('highSignalAreas', [])[:8],
+        },
+        'queryIntent': query_intent,
+        'taskDescription': task_description,
+        'availableTasks': available_tasks,
+        'files': build_read_file_entries(
+            file_paths[:read_limits['files']],
+            important_files,
+            graph,
+            representative_snippets,
+            index_state,
+            snippet_items[:read_limits['snippets']],
+        ),
+        'snippets': build_read_snippets(snippet_items[:read_limits['snippets']], representative_snippets),
+        'flowAnchors': build_read_flow_anchors(file_paths, snippet_items, query_intent, read_limits['anchors']),
+        'nextHops': build_read_next_hops(snapshot, file_paths, snippet_items, query_intent)[:read_limits['nextHops']],
+        'searchScope': build_read_search_scope(snapshot, file_paths[:read_limits['files']]),
+        'hotspots': graph.get('hotspots', [])[:8],
+        'moduleDependencies': graph.get('moduleDependencies', [])[:12],
+        'externalContext': summarize_external_context(snapshot.get('externalContext', {})),
+    }
+
+
+def describe_task(snapshot: dict, task: str) -> str | None:
+    task_pack = snapshot.get('contextPacks', {}).get(task, {})
+    if task_pack.get('description'):
+        return task_pack['description']
+
+    for sample in snapshot.get('retrieval', {}).get('sampleQueries', []):
+        if task.replace('-', ' ') in sample:
+            return sample
+    return None
+
+
+def build_default_read_paths(snapshot: dict, task_pack: dict) -> list[str]:
+    ordered_paths = []
+    ordered_paths.extend(snapshot.get('contextHints', {}).get('readOrder', [])[:6])
+    ordered_paths.extend(snapshot.get('summary', {}).get('entryPoints', [])[:6])
+    ordered_paths.extend(task_pack.get('files', [])[:8])
+
+    deduped = []
+    seen = set()
+    for path in ordered_paths:
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        deduped.append(path)
+        if len(deduped) >= 8:
+            break
+    return deduped
+
+
+def normalize_query_text(query: str | None) -> str | None:
+    if not query:
+        return query
+
+    normalized = query.replace('\ufffd', ' ')
+    normalized = re.sub(r'[^A-Za-z0-9_\s\-/.:#@\u4e00-\u9fff]+', ' ', normalized)
+    normalized = re.sub(r'\s+', ' ', normalized).strip()
+    return normalized or query
+
+
+GENERAL_QUERY_TERM_EXPANSIONS = {
+    'skill': ['skills'],
+    'skills': ['skill'],
+    'plugin': ['plugins', 'extension'],
+    'runtime': ['flow', 'lifecycle', 'engine', 'adapter'],
+    'lifecycle': ['runtime', 'flow'],
+    'download': ['install', 'fetch', 'clone', 'archive', 'zip'],
+    'install': ['download', 'setup', 'enable'],
+    'delete': ['remove', 'cleanup'],
+    'remove': ['delete', 'cleanup'],
+    'load': ['read', 'parse', 'resolve'],
+    'read': ['load', 'parse'],
+    'list': ['scan', 'discover'],
+    'config': ['setting', 'configure', 'options'],
+    'setting': ['config', 'configure', 'options'],
+    'route': ['routing', 'router', 'dispatch', 'delivery'],
+    'routing': ['route', 'router', 'dispatch', 'delivery'],
+    'gateway': ['adapter', 'connector', 'transport', 'channel'],
+    'message': ['reply', 'send', 'receive', 'channel'],
+    'store': ['persist', 'save', 'sqlite', 'db'],
+    'persist': ['store', 'save', 'sqlite'],
+    'type': ['types', 'interface', 'schema', 'model'],
+    'types': ['type', 'interface', 'schema', 'model'],
+    '配置': ['config', 'setting', 'configure', 'options'],
+    '路由': ['route', 'routing', 'router', 'dispatch', 'delivery'],
+    '网关': ['gateway', 'adapter', 'connector', 'transport', 'channel'],
+    '消息': ['message', 'reply', 'send', 'receive', 'channel'],
+    '存储': ['store', 'persist', 'save', 'sqlite', 'db'],
+    '持久化': ['persist', 'store', 'save', 'sqlite'],
+    '类型': ['type', 'types', 'interface', 'schema', 'model'],
+    '界面': ['ui', 'component', 'page', 'view'],
+    '组件': ['component', 'ui', 'view'],
+    '运行时': ['runtime', 'engine', 'adapter', 'flow'],
+    '生命周期': ['lifecycle', 'runtime', 'flow'],
+    '流程': ['flow', 'process', 'pipeline', 'lifecycle'],
+    '实现': ['implementation', 'implement', 'logic'],
+    '下载': ['download', 'install', 'fetch', 'clone', 'archive', 'zip'],
+    '安装': ['install', 'setup', 'enable'],
+    '删除': ['delete', 'remove', 'cleanup'],
+    '读取': ['read', 'load', 'parse'],
+    '加载': ['load', 'read', 'resolve'],
+    '解析': ['parse', 'resolve'],
+    '管理': ['manager', 'manage', 'management'],
+    '技能': ['skill', 'skills'],
+    '插件': ['plugin', 'plugins', 'extension'],
+    '服务': ['service', 'services'],
+    '处理': ['handler', 'process'],
+    '会话': ['session'],
+}
+
+GENERAL_QUERY_ACTION_TERMS = {
+    'download', 'install', 'delete', 'remove', 'load', 'read', 'list', 'scan',
+    'discover', 'parse', 'resolve', 'sync', 'start', 'stop', 'save', 'persist',
+    'dispatch', 'delivery', 'send', 'receive', 'reply',
+    '下载', '安装', '删除', '读取', '加载', '解析', '同步', '启动', '停止', '保存',
+    '持久化', '分发', '投递', '发送', '接收', '回复',
+}
+
+
+def extract_text_terms(text: str | None) -> list[str]:
+    if not text:
+        return []
+
+    normalized = normalize_query_text(text) or ''
+    normalized = re.sub(r'([a-z0-9])([A-Z])', r'\1 \2', normalized)
+    normalized = re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1 \2', normalized)
+    tokens = re.findall(r'[A-Za-z][A-Za-z0-9]*|[\u4e00-\u9fff]+|\d+', normalized.lower())
+
+    deduped: list[str] = []
+    seen = set()
+    for token in tokens:
+        token = token.strip()
+        if len(token) < 2 or token in seen:
+            continue
+        seen.add(token)
+        deduped.append(token)
+    return deduped
+
+
+def extract_query_terms(query: str | None) -> list[str]:
+    raw_terms = extract_text_terms(query)
+    collected: list[str] = []
+    seen = set()
+
+    for term in raw_terms:
+        if re.fullmatch(r'[\u4e00-\u9fff]+', term):
+            if len(term) <= 4 and term not in seen:
+                seen.add(term)
+                collected.append(term)
+            for candidate in GENERAL_QUERY_TERM_EXPANSIONS:
+                if candidate in term and candidate not in seen:
+                    seen.add(candidate)
+                    collected.append(candidate)
+            continue
+
+        if term not in seen:
+            seen.add(term)
+            collected.append(term)
+
+    return collected[:24]
+
+
+def expand_query_terms(terms: list[str]) -> list[str]:
+    expanded: list[str] = []
+    seen = set()
+
+    for term in terms:
+        if term not in seen:
+            seen.add(term)
+            expanded.append(term)
+        for synonym in GENERAL_QUERY_TERM_EXPANSIONS.get(term, []):
+            if synonym not in seen:
+                seen.add(synonym)
+                expanded.append(synonym)
+
+    return expanded[:32]
+
+
+def determine_read_limits(query_intent: dict) -> dict[str, int]:
+    labels = set(query_intent.get('labels', []))
+    keywords = set(query_intent.get('keywords', []))
+    limits = {
+        'files': 8,
+        'snippets': 8,
+        'nextHops': 5,
+        'anchors': 5,
+    }
+
+    if 'integration-flow' in labels or 'routing-flow' in labels:
+        limits.update({
+            'files': 6,
+            'snippets': 6,
+            'nextHops': 4,
+            'anchors': 6,
+        })
+    elif 'configuration' in labels or 'documentation-link' in labels:
+        limits.update({
+            'files': 6,
+            'snippets': 6,
+            'nextHops': 4,
+            'anchors': 4,
+        })
+    elif 'runtime-flow' in labels:
+        limits.update({
+            'files': 6,
+            'snippets': 6,
+            'nextHops': 4,
+            'anchors': 5,
+        })
+
+    if keywords & GENERAL_QUERY_ACTION_TERMS:
+        limits['files'] = min(limits['files'], 6)
+        limits['snippets'] = min(limits['snippets'], 5)
+
+    return limits
+
+
+def prioritize_read_file_paths(
+    file_paths: list[str],
+    snippet_items: list[dict],
+    query_intent: dict,
+) -> list[str]:
+    labels = set(query_intent.get('labels', []))
+    query_terms = set(query_intent.get('keywords', []))
+    snippet_paths = [item.get('path') for item in snippet_items if item.get('path')]
+    ordered_candidates = []
+    ordered_candidates.extend(snippet_paths)
+    ordered_candidates.extend(file_paths)
+
+    deduped = []
+    seen = set()
+    for path in ordered_candidates:
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        deduped.append(path)
+
+    def score_path(path: str) -> tuple[int, int, str]:
+        lowered = path.lower()
+        path_terms = set(extract_text_terms(path))
+        score = 0
+        structural_tokens = [
+            'manager',
+            'handler',
+            'controller',
+            'service',
+            'store',
+            'repository',
+            'adapter',
+            'gateway',
+            'connector',
+            'middleware',
+            'transport',
+            'channel',
+            'session',
+            'route',
+            'router',
+            'dispatch',
+            'delivery',
+        ]
+        module_tokens = [
+            '/main/',
+            '/server/',
+            '/api/',
+            '/services/',
+            '/handlers/',
+            '/controllers/',
+            '/routes/',
+            '/stores/',
+            '/modules/',
+            '/runtime/',
+        ]
+
+        if path in snippet_paths:
+            score += 40
+
+        if lowered.startswith('src/') or lowered.startswith('app/') or lowered.startswith('server/'):
+            score += 12
+        if any(token in lowered for token in ['/docs/', 'readme', 'skill.md', 'prompt', '/rules/']):
+            score -= 18
+        if (lowered.startswith('scripts/') or '/scripts/' in lowered) and not (query_terms & {'script', 'setup', 'build', 'cli'}):
+            score -= 10
+
+        keyword_overlap = len(path_terms & query_terms)
+        if keyword_overlap:
+            score += min(keyword_overlap, 3) * 12
+
+        if 'integration-flow' in labels or 'routing-flow' in labels:
+            if any(token in lowered for token in structural_tokens):
+                score += 28
+            if any(token in lowered for token in module_tokens):
+                score += 18
+            if any(token in lowered for token in ['constants', '/i18n.', '/locales/', '/assets/']):
+                score -= 12
+
+        if 'configuration' in labels or 'documentation-link' in labels:
+            if any(token in lowered for token in ['imsettings', 'settings.tsx', '/components/', 'schemaform', 'config', '/types/']):
+                score += 25
+
+        if 'runtime-flow' in labels:
+            if any(token in lowered for token in ['runtime', 'manager', 'adapter', 'engine', 'gateway', 'connector', 'plugin']):
+                score += 20
+            if query_terms & GENERAL_QUERY_ACTION_TERMS and any(
+                token in lowered for token in ['manager', 'service', 'handler', 'controller', 'route', 'router', 'store', 'gateway', 'adapter']
+            ):
+                score += 14
+
+        return (-score, 0 if path in snippet_paths else 1, path)
+
+    return sorted(deduped, key=score_path)
+
+
+def infer_query_intent(query: str | None) -> dict:
+    if not query:
+        return {
+            'labels': ['general-read'],
+            'keywords': [],
+        }
+
+    lowered = query.lower()
+    labels = []
+
+    if any(token in lowered for token in ['config', 'setting', '配置', '参数']):
+        labels.append('configuration')
+    if any(token in lowered for token in ['link', 'url', 'guide', 'doc', '文档', '链接']):
+        labels.append('documentation-link')
+    if any(token in lowered for token in ['persist', 'save', 'store', '保存', '持久化']):
+        labels.append('persistence-flow')
+    if any(token in lowered for token in ['type', 'schema', 'interface', 'model', '类型']):
+        labels.append('type-definition')
+    if any(token in lowered for token in ['ui', 'component', 'page', '界面', '组件']):
+        labels.append('ui-entry')
+    if any(token in lowered for token in ['runtime', 'lifecycle', 'flow', '执行', '链路']):
+        labels.append('runtime-flow')
+
+    if not labels:
+        labels.append('general-read')
+
+    keywords = sorted({
+        token
+        for token in re.findall(r'[\w\-/.:#@]+', lowered)
+        if len(token) >= 3
+    })[:16]
+
+    return {
+        'labels': labels,
+        'keywords': keywords,
+    }
+
+
+def infer_query_intent_v2(query: str | None) -> dict:
+    if not query:
+        return {
+            'labels': ['general-read'],
+            'keywords': [],
+        }
+
+    lowered = (normalize_query_text(query) or query).lower()
+    labels = []
+
+    if any(token in lowered for token in ['config', 'setting', '配置', '参数']):
+        labels.append('configuration')
+    if any(token in lowered for token in ['link', 'url', 'guide', 'doc', '文档', '链接']):
+        labels.append('documentation-link')
+    if any(token in lowered for token in ['persist', 'save', 'store', '保存', '持久']):
+        labels.append('persistence-flow')
+    if any(token in lowered for token in ['type', 'schema', 'interface', 'model', '类型']):
+        labels.append('type-definition')
+    if any(token in lowered for token in ['ui', 'component', 'page', '界面', '组件']):
+        labels.append('ui-entry')
+    if any(token in lowered for token in ['runtime', 'lifecycle', 'flow', '执行', '链路']):
+        labels.append('runtime-flow')
+    if any(token in lowered for token in ['gateway', 'delivery', 'route', 'handler', 'session', 'router', '投递', '路由', '网关']):
+        labels.append('integration-flow')
+    if any(token in lowered for token in ['delivery route', 'message', 'session', '投递', '消息', '路由', 'route']):
+        labels.append('routing-flow')
+
+    if not labels:
+        labels.append('general-read')
+
+    keywords = sorted({
+        token
+        for token in re.findall(r'[\w\-/.:#@]+', lowered)
+        if len(token) >= 3 and '�' not in token
+    })[:16]
+
+    return {
+        'labels': sorted(dict.fromkeys(labels)),
+        'keywords': keywords,
+    }
+
+
+infer_query_intent = infer_query_intent_v2
+
+
+def infer_query_intent_generic(query: str | None) -> dict:
+    if not query:
+        return {
+            'labels': ['general-read'],
+            'keywords': [],
+        }
+
+    lowered = (normalize_query_text(query) or query).lower()
+    labels = []
+
+    if any(token in lowered for token in ['config', 'setting', '配置', '参数']):
+        labels.append('configuration')
+    if any(token in lowered for token in ['link', 'url', 'guide', 'doc', '文档', '链接', '说明']):
+        labels.append('documentation-link')
+    if any(token in lowered for token in ['persist', 'save', 'store', '保存', '持久', '存储']):
+        labels.append('persistence-flow')
+    if any(token in lowered for token in ['type', 'schema', 'interface', 'model', '类型', '模型', '接口']):
+        labels.append('type-definition')
+    if any(token in lowered for token in ['ui', 'component', 'page', '界面', '组件', '页面']):
+        labels.append('ui-entry')
+    if any(token in lowered for token in ['runtime', 'lifecycle', 'flow', '执行', '链路', '流程']):
+        labels.append('runtime-flow')
+    if any(token in lowered for token in ['gateway', 'adapter', 'connector', 'integration', 'plugin', 'handler', 'manager', 'session', '网关', '适配', '连接', '集成', '插件']):
+        labels.append('integration-flow')
+    if any(token in lowered for token in ['route', 'router', 'delivery', 'dispatch', 'message', 'reply', 'channel', 'session', '路由', '投递', '分发', '消息', '回复', '通道', '会话']):
+        labels.append('routing-flow')
+
+    if not labels:
+        labels.append('general-read')
+
+    keywords = sorted({
+        token
+        for token in re.findall(r'[\w\-/.:#@\u4e00-\u9fff]+', lowered)
+        if len(token) >= 2 and '锟' not in token
+    })[:16]
+
+    return {
+        'labels': sorted(dict.fromkeys(labels)),
+        'keywords': keywords,
+    }
+
+
+infer_query_intent = infer_query_intent_generic
+infer_query_intent_v2 = infer_query_intent_generic
+
+
+def infer_query_intent_framework(query: str | None) -> dict:
+    if not query:
+        return {
+            'labels': ['general-read'],
+            'keywords': [],
+            'terms': [],
+        }
+
+    lowered = (normalize_query_text(query) or query).lower()
+    terms = extract_query_terms(lowered)
+    keywords = expand_query_terms(terms)
+    keyword_set = set(keywords)
+    labels = []
+
+    if keyword_set & {'config', 'setting', 'configure', 'options', '配置'}:
+        labels.append('configuration')
+    if keyword_set & {'link', 'url', 'guide', 'doc', 'docs', 'documentation', '说明', '文档'}:
+        labels.append('documentation-link')
+    if keyword_set & {'persist', 'save', 'store', 'sqlite', 'db', '持久化', '存储', '保存'}:
+        labels.append('persistence-flow')
+    if keyword_set & {'type', 'types', 'interface', 'schema', 'model', '类型'}:
+        labels.append('type-definition')
+    if keyword_set & {'ui', 'component', 'page', 'view', '界面', '组件'}:
+        labels.append('ui-entry')
+    if keyword_set & {'runtime', 'lifecycle', 'flow', 'process', 'pipeline', '运行时', '生命周期', '流程'}:
+        labels.append('runtime-flow')
+    if keyword_set & {'skill', 'skills', 'plugin', 'plugins'} and keyword_set & GENERAL_QUERY_ACTION_TERMS:
+        labels.append('runtime-flow')
+    if keyword_set & {'gateway', 'adapter', 'connector', 'integration', 'plugin', 'handler', 'manager', 'session', 'channel', '网关', '适配', '集成', '插件'}:
+        labels.append('integration-flow')
+    if keyword_set & {'route', 'routing', 'router', 'delivery', 'dispatch', 'message', 'reply', 'channel', 'session', '路由', '投递', '分发', '消息', '回复', '会话'}:
+        labels.append('routing-flow')
+
+    if not labels:
+        labels.append('general-read')
+
+    return {
+        'labels': sorted(dict.fromkeys(labels)),
+        'keywords': keywords[:20],
+        'terms': terms[:20],
+    }
+
+
+infer_query_intent = infer_query_intent_framework
+infer_query_intent_v2 = infer_query_intent_framework
+
+
+def rerank_read_matches(matches: list[dict], query_intent: dict) -> list[dict]:
+    labels = set(query_intent.get('labels', []))
+    query_terms = set(query_intent.get('keywords', []))
+    action_terms = query_terms & GENERAL_QUERY_ACTION_TERMS
+    reranked = []
+
+    for item in matches:
+        bonus = 0
+        path = (item.get('path') or '').lower()
+        kind = (item.get('kind') or '').lower()
+        preview = (item.get('preview') or '').lower()
+        signals = ' '.join(item.get('signals', [])).lower()
+        haystack = ' '.join([path, kind, preview, signals])
+        haystack_terms = set(extract_text_terms(haystack))
+
+        if path.startswith('src/') or path.startswith('app/') or path.startswith('server/'):
+            bonus += 12
+        if any(token in path for token in ['/docs/', 'readme', 'skill.md', 'prompt', '/rules/']):
+            bonus -= 18
+        if (path.startswith('scripts/') or '/scripts/' in path) and not (query_terms & {'script', 'setup', 'build', 'cli'}):
+            bonus -= 10
+
+        if 'documentation-link' in labels:
+            if kind == 'link':
+                bonus += 40
+            if any(token in haystack for token in ['guideurl', 'http://', 'https://', 'guide', 'docs', 'link']):
+                bonus += 24
+
+        if 'configuration' in labels:
+            if kind in {'config-flow', 'config-type'}:
+                bonus += 28
+            if any(token in haystack for token in ['config', 'setting', 'persistconfig', 'updateconfig']):
+                bonus += 18
+
+        if 'ui-entry' in labels:
+            if any(token in path for token in ['/components/', 'settings.tsx', 'imsettings']):
+                bonus += 24
+
+        if 'persistence-flow' in labels and any(token in haystack for token in ['persist', 'store', 'save']):
+            bonus += 20
+
+        if 'type-definition' in labels and any(token in path for token in ['/types/', '.d.ts', 'schema', 'model']):
+            bonus += 16
+
+        if 'runtime-flow' in labels:
+            if any(token in path for token in ['runtime', 'adapter', 'manager', '/main/', 'gateway', 'engine', 'plugin', 'connector']):
+                bonus += 28
+            if any(token in haystack for token in ['runtime', 'lifecycle', 'session', 'manager', 'adapter', 'gateway', 'engine', 'plugin']):
+                bonus += 20
+
+        if 'integration-flow' in labels:
+            if any(token in path for token in ['manager', 'handler', 'adapter', 'gateway', 'connector', 'plugin', 'service', '/main/', '/server/', '/api/']):
+                bonus += 28
+            if any(token in haystack for token in ['gateway', 'adapter', 'connector', 'integration', 'session', 'handler', 'channel', 'plugin', 'transport']):
+                bonus += 22
+
+        if 'routing-flow' in labels:
+            if any(token in path for token in ['route', 'router', 'dispatch', 'delivery', 'handler', 'gateway', 'channel', 'session']):
+                bonus += 24
+            if any(token in haystack for token in ['route', 'delivery', 'dispatch', 'session', 'message', 'reply', 'channel', 'send', 'receive']):
+                bonus += 18
+
+        keyword_overlap = len(haystack_terms & query_terms)
+        if keyword_overlap:
+            bonus += min(keyword_overlap, 4) * 6
+
+        if action_terms and haystack_terms & action_terms:
+            bonus += 14
+
+        reranked.append((item.get('score', 0) + bonus, item))
+
+    reranked.sort(key=lambda pair: (-pair[0], pair[1].get('path') or '', pair[1].get('startLine') or 0))
+    return [item for _, item in reranked]
+
+
+def build_read_file_entries(
+    file_paths: list[str],
+    important_files: list[dict],
+    graph: dict,
+    representative_snippets: list[dict],
+    index_state: dict | None,
+    snippet_items: list[dict],
+) -> list[dict]:
+    important_by_path = {item['path']: item for item in important_files}
+    hotspot_by_path = {item['path']: item for item in graph.get('hotspots', [])}
+    index_files = (index_state or {}).get('files', {})
+    snippet_by_path = {}
+    for item in snippet_items:
+        if item.get('path') and item.get('preview'):
+            snippet_by_path.setdefault(item['path'], item)
+    for item in representative_snippets:
+        snippet_by_path.setdefault(item['path'], item)
+
+    entries = []
+    for path in file_paths:
+        important = important_by_path.get(path, {})
+        hotspot = hotspot_by_path.get(path, {})
+        indexed = index_files.get(path, {})
+        snippet = snippet_by_path.get(path, {})
+        inferred_role = infer_read_file_role(path, snippet)
+        role = important.get('role')
+        if not role or role in {'Implementation', 'Data model'}:
+            role = inferred_role or role
+        language = important.get('language') or indexed.get('language')
+        lines = important.get('lines') or indexed.get('lineCount')
+        why_important = important.get('whyImportant') or infer_read_file_reason(path, snippet, hotspot, indexed)
+        entries.append({
+            'path': path,
+            'role': role,
+            'language': language,
+            'lines': lines,
+            'whyImportant': why_important,
+            'score': important.get('score'),
+            'hotspot': {
+                'inbound': hotspot.get('inbound', 0),
+                'outbound': hotspot.get('outbound', 0),
+                'signals': hotspot.get('signals', 0),
+            },
+            'previewReason': snippet.get('reason'),
+        })
+    return entries
+
+
+def infer_read_file_role(path: str, snippet: dict) -> str | None:
+    lowered = path.lower()
+    snippet_kind = (snippet.get('kind') or '').lower()
+
+    if lowered.endswith(('main.ts', 'app.tsx', 'preload.ts', 'index.html')):
+        return 'Entry point'
+    if any(token in lowered for token in ['/components/', '.tsx', 'view', 'screen', 'page', 'settings']):
+        return 'UI component'
+    if any(token in lowered for token in ['/types/', '.d.ts', 'schema', 'model', 'types.ts', 'types.py']):
+        return 'Type definition'
+    if any(token in lowered for token in ['config', 'setting']):
+        return 'Configuration'
+    if any(token in lowered for token in ['manager', 'runtime', 'adapter', 'gateway', 'connector', 'agentengine', 'plugin']):
+        return 'Runtime / integration'
+    if any(token in lowered for token in ['route', 'router', 'dispatch', 'delivery', 'transport']):
+        return 'Routing / transport'
+    if any(token in lowered for token in ['handler', 'controller', 'middleware']):
+        return 'Handler / controller'
+    if any(token in lowered for token in ['store', 'sqlite']):
+        return 'Store'
+    if '/services/' in lowered or lowered.endswith('service.ts'):
+        return 'Service'
+    if snippet_kind == 'link':
+        return 'Documentation / link source'
+    return None
+
+
+def infer_read_file_reason(path: str, snippet: dict, hotspot: dict, indexed: dict) -> str | None:
+    reasons = []
+    line_count = indexed.get('lineCount')
+    lowered = path.lower()
+    snippet_kind = (snippet.get('kind') or '').lower()
+    snippet_reason = snippet.get('reason')
+    snippet_signals = snippet.get('signals', [])
+    inbound = hotspot.get('inbound', 0)
+    outbound = hotspot.get('outbound', 0)
+    signals = hotspot.get('signals', 0)
+
+    if line_count:
+        reasons.append(f'{line_count} lines')
+    if snippet_reason:
+        reasons.append(str(snippet_reason))
+    elif snippet_kind == 'link':
+        reasons.append('contains guide or external link definitions')
+    elif snippet_kind == 'action-flow':
+        reasons.append('contains action-oriented implementation flow')
+    elif snippet_kind == 'config-flow':
+        reasons.append('contains configuration persistence flow')
+    elif snippet_kind == 'config-type':
+        reasons.append('contains configuration-related type definitions')
+    elif snippet_kind == 'function':
+        reasons.append('contains implementation anchors')
+
+    if snippet_signals:
+        reasons.append('signals: ' + ', '.join(snippet_signals[:3]))
+
+    if inbound or outbound:
+        reasons.append(f'hotspot in={inbound} out={outbound}')
+    elif signals:
+        reasons.append(f'{signals} structural signals')
+
+    if any(token in lowered for token in ['skillmanager', 'runtime', 'adapter', 'gateway']):
+        reasons.append('participates in runtime or skill execution flow')
+    elif any(token in lowered for token in ['/components/', 'settings.tsx', 'imsettings']):
+        reasons.append('entry point for user-facing configuration flow')
+    elif any(token in lowered for token in ['/types/', '.d.ts', 'types.ts', 'types.py']):
+        reasons.append('defines shared types consumed across modules')
+
+    if not reasons:
+        return None
+
+    seen = set()
+    deduped = []
+    for reason in reasons:
+        if reason in seen:
+            continue
+        seen.add(reason)
+        deduped.append(reason)
+    return ', '.join(deduped[:3])
+
+
+def build_read_snippets(snippet_items: list[dict], representative_snippets: list[dict]) -> list[dict]:
+    snippets = []
+    seen = set()
+
+    for item in snippet_items[:10]:
+        preview = item.get('preview') or item.get('snippet')
+        path = item.get('path')
+        start_line = item.get('startLine')
+        end_line = item.get('endLine')
+        if not path or not preview:
+            continue
+        key = (path, start_line, end_line, preview)
+        if key in seen:
+            continue
+        seen.add(key)
+        snippets.append({
+            'path': path,
+            'kind': item.get('kind'),
+            'startLine': start_line,
+            'endLine': end_line,
+            'preview': preview,
+            'signals': item.get('signals', []),
+            'score': item.get('score'),
+            'whyMatched': item.get('reasons') or item.get('reason'),
+        })
+
+    if snippets:
+        return snippets
+
+    for item in representative_snippets[:8]:
+        key = (item.get('path'), item.get('startLine'), item.get('endLine'), item.get('snippet'))
+        if key in seen:
+            continue
+        seen.add(key)
+        snippets.append({
+            'path': item.get('path'),
+            'kind': 'representative',
+            'startLine': item.get('startLine'),
+            'endLine': item.get('endLine'),
+            'preview': item.get('snippet'),
+            'signals': [],
+            'score': None,
+            'whyMatched': item.get('reason'),
+        })
+
+    return snippets
+
+
+def build_read_flow_anchors(
+    file_paths: list[str],
+    snippet_items: list[dict],
+    query_intent: dict,
+    limit: int,
+) -> list[dict]:
+    labels = set(query_intent.get('labels', []))
+    if not labels.intersection({'integration-flow', 'routing-flow', 'runtime-flow'}):
+        return []
+
+    anchors = []
+    seen = set()
+    query_terms = set(query_intent.get('keywords', []))
+    action_terms = query_terms & GENERAL_QUERY_ACTION_TERMS
+
+    def allow_path(path: str) -> bool:
+        lowered = (path or '').lower()
+        if {'integration-flow', 'routing-flow'} & labels:
+            return any(token in lowered for token in ['gateway', 'route', 'router', 'handler', 'manager', 'store', 'service', 'adapter', 'connector', 'session', 'channel', '/main/', '/server/', '/api/'])
+        return True
+
+    def classify_anchor(path: str, kind: str, preview: str = '') -> tuple[str | None, int]:
+        lowered = (path or '').lower()
+        combined_terms = set(extract_text_terms(f'{path or ""} {preview or ""}'))
+        if lowered.endswith('index.ts') or lowered.endswith('main.ts') or lowered.endswith('app.tsx'):
+            return 'entry', 0
+        if 'runtime-flow' in labels and action_terms and kind in {'function', 'action-flow'} and combined_terms & action_terms:
+            return 'operation', 1
+        if 'manager' in lowered:
+            return 'manager', 2
+        if 'deliveryroute' in lowered or 'route' in lowered or 'router' in lowered or 'dispatch' in lowered:
+            return 'routing', 3
+        if 'handler' in lowered:
+            return 'handler', 4
+        if 'store' in lowered:
+            return 'store', 5
+        if any(token in lowered for token in ['gateway', 'adapter', 'connector', 'plugin', 'transport']):
+            return 'integration', 6
+        if 'type' in lowered or '.d.ts' in lowered or 'schema' in lowered or 'model' in lowered:
+            return 'types', 7
+        if kind == 'function':
+            return 'implementation', 8
+        return None, 99
+
+    for item in snippet_items:
+        path = item.get('path')
+        if not path or not allow_path(path):
+            continue
+        anchor_type, priority = classify_anchor(
+            path,
+            item.get('kind') or '',
+            item.get('preview') or item.get('snippet') or '',
+        )
+        if not anchor_type:
+            continue
+        key = (path, anchor_type)
+        if key in seen:
+            continue
+        seen.add(key)
+        raw_reason = item.get('reasons') or item.get('reason') or []
+        if isinstance(raw_reason, list):
+            reason = ', '.join(raw_reason[:2])
+        else:
+            reason = str(raw_reason)
+        anchors.append({
+            'type': anchor_type,
+            'path': path,
+            'startLine': item.get('startLine'),
+            'endLine': item.get('endLine'),
+            'kind': item.get('kind'),
+            'reason': reason,
+            '_priority': priority,
+        })
+
+    for path in file_paths:
+        if not allow_path(path):
+            continue
+        anchor_type, priority = classify_anchor(path, '')
+        if not anchor_type:
+            continue
+        key = (path, anchor_type)
+        if key in seen:
+            continue
+        seen.add(key)
+        anchors.append({
+            'type': anchor_type,
+            'path': path,
+            'startLine': None,
+            'endLine': None,
+            'kind': 'file',
+            'reason': 'selected as high-value file for this flow',
+            '_priority': priority,
+        })
+
+    anchors.sort(key=lambda item: (item['_priority'], item['path'], item.get('startLine') or 0))
+    return [{key: value for key, value in item.items() if key != '_priority'} for item in anchors[:limit]]
+
+
+def build_read_next_hops(
+    snapshot: dict,
+    file_paths: list[str],
+    snippet_items: list[dict],
+    query_intent: dict,
+) -> list[dict]:
+    graph = snapshot.get('graph', {})
+    important_files = snapshot.get('importantFiles', [])
+    important_by_path = {item['path']: item for item in important_files}
+    hotspot_by_path = {item['path']: item for item in graph.get('hotspots', [])}
+    dependency_map = {
+        item['path']: item['dependsOn']
+        for item in graph.get('fileDependencies', [])
+    }
+    module_file_map = {
+        item.get('module'): [file_item.get('path') for file_item in item.get('files', []) if file_item.get('path')]
+        for item in graph.get('pathIndex', [])
+    }
+    next_hops = []
+    seen = set(file_paths)
+    matched_paths = [item.get('path') for item in snippet_items if item.get('path')]
+    intent_labels = set(query_intent.get('labels', []))
+    query_terms = set(query_intent.get('keywords', []))
+
+    def path_module(path: str) -> str:
+        normalized = normalize_rel_path(path)
+        parts = Path(normalized).parts
+        if not parts:
+            return './'
+        if len(parts) >= 4 and parts[0] == 'src' and parts[1] in {'main', 'renderer', 'common'}:
+            return f'{parts[0]}/{parts[1]}/{parts[2]}/'
+        if len(parts) >= 2 and parts[0] == 'src':
+            return f'{parts[0]}/{parts[1]}/'
+        if len(parts) >= 2 and parts[0] in {'SKILLs', 'skills', 'packages', 'apps', 'openclaw-extensions'}:
+            return f'{parts[0]}/{parts[1]}/'
+        if len(parts) == 1:
+            return './'
+        first_part = next(iter(parts), '')
+        return './' if not first_part else f'{first_part}/'
+
+    def add_hop(path: str, reason: str) -> None:
+        path = normalize_rel_path(path)
+        if not path or path in seen:
+            return
+        seen.add(path)
+        important = important_by_path.get(path, {})
+        hotspot = hotspot_by_path.get(path, {})
+        inferred_role = infer_read_file_role(path, {})
+        why_important = important.get('whyImportant')
+        if not why_important:
+            fragments = []
+            if hotspot.get('inbound') or hotspot.get('outbound'):
+                fragments.append(f"hotspot in={hotspot.get('inbound', 0)} out={hotspot.get('outbound', 0)}")
+            if hotspot.get('signals'):
+                fragments.append(f"signals={hotspot.get('signals', 0)}")
+            if inferred_role:
+                fragments.append(inferred_role.lower())
+            why_important = ', '.join(fragments) if fragments else 'related follow-up file'
+        next_hops.append({
+            'path': path,
+            'reason': reason,
+            'role': inferred_role or important.get('role'),
+            'whyImportant': why_important,
+        })
+
+    for path in matched_paths[:6]:
+        for dependency in dependency_map.get(path, [])[:4]:
+            add_hop(dependency, 'matched file dependency')
+
+    if 'configuration' in intent_labels or 'documentation-link' in intent_labels:
+        for item in important_files:
+            path = item['path'].lower()
+            if any(token in path for token in ['config', 'setting', 'readme', 'guide', 'doc']):
+                add_hop(item['path'], 'configuration or guide follow-up')
+                if len(next_hops) >= 8:
+                    break
+
+    if 'type-definition' in intent_labels or 'configuration' in intent_labels:
+        for item in important_files:
+            path = item['path'].lower()
+            if any(token in path for token in ['types', 'type', '.d.ts', 'schema', 'model']):
+                add_hop(item['path'], 'type definition follow-up')
+                if len(next_hops) >= 8:
+                    break
+
+    if 'persistence-flow' in intent_labels:
+        for item in important_files:
+            path = item['path'].lower()
+            if any(token in path for token in ['store', 'service', 'sqlite', 'persist']):
+                add_hop(item['path'], 'persistence flow follow-up')
+                if len(next_hops) >= 8:
+                    break
+
+    if 'ui-entry' in intent_labels:
+        for item in important_files:
+            path = item['path'].lower()
+            if any(token in path for token in ['component', 'app.tsx', 'page', 'view', 'settings']):
+                add_hop(item['path'], 'ui entry follow-up')
+                if len(next_hops) >= 8:
+                    break
+
+    if 'integration-flow' in intent_labels or 'routing-flow' in intent_labels:
+        flow_candidates = []
+        flow_candidates.extend(file_paths)
+        flow_candidates.extend(item.get('path') for item in snippet_items if item.get('path'))
+        flow_candidates.extend(item['path'] for item in important_files)
+        deduped_candidates = []
+        seen_candidates = set()
+        for path in flow_candidates:
+            path = normalize_rel_path(path) if path else path
+            if not path or path in seen_candidates:
+                continue
+            seen_candidates.add(path)
+            deduped_candidates.append(path)
+        deduped_candidates.sort(
+            key=lambda candidate: (
+                -len(set(extract_text_terms(candidate)) & query_terms),
+                candidate,
+            )
+        )
+        for path in deduped_candidates:
+            lowered = (path or '').lower()
+            if any(token in lowered for token in ['gateway', 'adapter', 'connector', 'manager', 'handler', 'route', 'router', 'dispatch', 'delivery', 'store', 'service', 'session', 'channel']):
+                add_hop(path, 'integration or routing follow-up')
+                if len(next_hops) >= 8:
+                    break
+
+    if 'runtime-flow' in intent_labels:
+        runtime_candidates = []
+        matched_modules = {path_module(path) for path in matched_paths + file_paths if path}
+        for module_name in matched_modules:
+            runtime_candidates.extend(module_file_map.get(module_name, [])[:8])
+        runtime_candidates.extend(snapshot.get('summary', {}).get('entryPoints', [])[:8])
+        runtime_candidates.extend(item['path'] for item in important_files)
+        deduped_runtime_candidates = []
+        seen_runtime = set()
+        for path in runtime_candidates:
+            path = normalize_rel_path(path) if path else path
+            if not path or path in seen_runtime:
+                continue
+            seen_runtime.add(path)
+            deduped_runtime_candidates.append(path)
+        deduped_runtime_candidates.sort(
+            key=lambda candidate: (
+                -len(set(extract_text_terms(candidate)) & query_terms),
+                candidate,
+            )
+        )
+        for path in deduped_runtime_candidates:
+            lowered = path.lower()
+            if any(token in lowered for token in ['main.ts', 'preload', 'skillmanager', 'runtime', 'adapter', 'gateway', 'engine', '/main/', 'channel', 'session', 'sync']):
+                add_hop(path, 'runtime flow follow-up')
+                if len(next_hops) >= 8:
+                    break
+
+    if query_terms:
+        for item in important_files:
+            lowered = item['path'].lower()
+            if any(keyword in lowered for keyword in query_terms):
+                add_hop(item['path'], 'keyword-related important file')
+                if len(next_hops) >= 8:
+                    break
+
+    return next_hops[:8]
+
+
+def build_read_search_scope(snapshot: dict, file_paths: list[str]) -> dict:
+    include_paths = []
+    for path in file_paths[:8]:
+        if path not in include_paths:
+            include_paths.append(path)
+
+    include_paths.extend(
+        path for path in snapshot.get('contextHints', {}).get('readOrder', [])[:4]
+        if path not in include_paths
+    )
+
+    return {
+        'preferPaths': include_paths[:10],
+        'excludePaths': [
+            'repo/progress/',
+            'node_modules/',
+            'dist/',
+            'build/',
+            '__pycache__/',
+        ],
+        'notes': [
+            'Prefer read-payload files before repo-wide search.',
+            'Exclude generated caches and snapshot artifacts from code search.',
+            'If more context is needed, follow nextHops before widening scope.',
+        ],
+    }
+
+
+def summarize_external_context(external_context: dict) -> dict:
+    return {
+        'recentChangedFiles': external_context.get('recentChangedFiles', [])[:10],
+        'documentationSources': external_context.get('documentationSources', [])[:10],
+        'decisionSources': external_context.get('decisionSources', [])[:10],
+        'teamConventions': external_context.get('teamConventions', [])[:8],
     }
 
 
@@ -1550,7 +2722,7 @@ def generate_snapshot(project_path: str, force: bool = False) -> dict:
 
     # Infer architecture
     architecture = infer_architecture(files, project_path)
-    graph = build_code_graph(file_records, unique_routes, unique_models, key_functions, workspace)
+    graph = build_code_graph(file_records, unique_routes, unique_models, key_functions, workspace, Path(project_path))
     external_context = collect_external_context(project_path, file_records)
     retrieval, context_packs = build_retrieval_artifacts(chunks, important_files, graph, external_context)
 
@@ -1598,29 +2770,90 @@ def generate_snapshot(project_path: str, force: bool = False) -> dict:
     return snapshot
 
 
+def read_query_input(
+    inline_query: str | None = None,
+    escaped_query: str | None = None,
+    query_file: str | None = None,
+    use_stdin: bool = False,
+) -> str | None:
+    if escaped_query:
+        return codecs.decode(escaped_query, 'unicode_escape').strip() or None
+
+    if query_file:
+        query_path = Path(query_file)
+        if not query_path.exists():
+            raise FileNotFoundError(f'Query file not found: {query_file}')
+        return query_path.read_text(encoding='utf-8-sig').strip() or None
+
+    if use_stdin:
+        return sys.stdin.read().strip() or None
+
+    return inline_query
+
+
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python generate.py <project_path> [--force] [--task <task>] [--query <query>]", file=sys.stderr)
+        print(
+            "Usage: python generate.py <project_path> [read|--read] [--force] "
+            "[--task <task>] [--query <query> | --query-escaped <ascii_escaped_query> "
+            "| --query-file <utf8_file> | --query-stdin]",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     project_path = sys.argv[1]
-    force = '--force' in sys.argv or '--refresh' in sys.argv
+    cli_args = sys.argv[2:]
+    read_mode = '--read' in cli_args or (len(cli_args) > 0 and cli_args[0] == 'read')
+    force = '--force' in cli_args or '--refresh' in cli_args or (len(cli_args) > 0 and cli_args[0] == 'refresh')
     task = 'understand-project'
     query = None
+    escaped_query = None
+    query_file = None
+    query_stdin = '--query-stdin' in cli_args
 
-    if '--task' in sys.argv:
-        task_index = sys.argv.index('--task')
-        if task_index + 1 < len(sys.argv):
-            task = sys.argv[task_index + 1]
+    if '--task' in cli_args:
+        task_index = cli_args.index('--task')
+        if task_index + 1 < len(cli_args):
+            task = cli_args[task_index + 1]
 
-    if '--query' in sys.argv:
-        query_index = sys.argv.index('--query')
-        if query_index + 1 < len(sys.argv):
-            query = sys.argv[query_index + 1]
+    if '--query' in cli_args:
+        query_index = cli_args.index('--query')
+        if query_index + 1 < len(cli_args):
+            query = cli_args[query_index + 1]
+
+    if '--query-escaped' in cli_args:
+        escaped_query_index = cli_args.index('--query-escaped')
+        if escaped_query_index + 1 < len(cli_args):
+            escaped_query = cli_args[escaped_query_index + 1]
+
+    if '--query-file' in cli_args:
+        query_file_index = cli_args.index('--query-file')
+        if query_file_index + 1 < len(cli_args):
+            query_file = cli_args[query_file_index + 1]
 
     if not os.path.isdir(project_path):
         print(f"Error: {project_path} is not a valid directory", file=sys.stderr)
         sys.exit(1)
+
+    try:
+        query = read_query_input(query, escaped_query, query_file, query_stdin)
+    except FileNotFoundError as error:
+        print(f"Error: {error}", file=sys.stderr)
+        sys.exit(1)
+
+    if read_mode:
+        base = Path(project_path)
+        snapshot = load_existing_snapshot(base / 'repo' / 'progress' / 'miloya-codebase.json')
+        if not snapshot:
+            print(
+                "Error: snapshot not found. Run /miloya-codebase or /miloya-codebase refresh first.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        index_state = load_existing_index_state(base / 'repo' / 'progress' / 'miloya-codebase.index.json')
+        write_json_stdout(build_read_payload(snapshot, index_state, task, query))
+        return
 
     snapshot = generate_snapshot(project_path, force)
 
@@ -1635,15 +2868,15 @@ def main():
 
 def write_json_stdout(payload: dict) -> None:
     text = json.dumps(payload, indent=2, ensure_ascii=False) + '\n'
+    buffer = getattr(sys.stdout, 'buffer', None)
+    if buffer is not None:
+        buffer.write(text.encode('utf-8'))
+        buffer.flush()
+        return
+
     try:
         sys.stdout.write(text)
     except UnicodeEncodeError:
-        buffer = getattr(sys.stdout, 'buffer', None)
-        if buffer is not None:
-            buffer.write(text.encode('utf-8', errors='replace'))
-            buffer.flush()
-            return
-
         safe_text = text.encode('ascii', errors='backslashreplace').decode('ascii')
         sys.stdout.write(safe_text)
 

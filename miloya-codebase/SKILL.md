@@ -60,14 +60,32 @@ Read the existing snapshot directly from `{project}/repo/progress/miloya-codebas
 
 Behavior:
 
-- Use the already generated snapshot as-is
+- Use the already generated snapshot and index as-is
 - Skip forced regeneration logic
+- Return a retrieval-oriented payload with:
+  - high-value files
+  - code snippets with line ranges
+  - task-oriented reading packs
+  - graph hotspots and external context
+- When the user asks a focused question, prefer running read mode with
+  `--task` plus a UTF-8 safe query channel so the output contains direct code
+  anchors instead of only a project summary
+- On Windows or any environment where non-ASCII query text may be mojibake,
+  prefer `--query-escaped <ascii_only_query>` first, then `--query-file
+  <utf8_file>` or `--query-stdin`, instead of raw `--query`
+- In read mode, prefer this workflow:
+  1. inspect `files`, `snippets`, `nextHops`, and `searchScope`
+  2. read the suggested files directly when possible
+  3. only widen to repo search if the read payload is insufficient
+  4. when widening search, explicitly exclude `repo/progress/`, `node_modules/`,
+     `dist/`, `build/`, and `__pycache__/`
 
 Recommended use:
 
 - The snapshot already exists
 - You are switching models/tools and only want to load the saved context quickly
 - You want a stable handoff artifact without rescanning
+- You want fast file and snippet retrieval for a concrete task without rescanning
 
 ## How It Works
 
@@ -101,8 +119,23 @@ This skill uses `scripts/generate.py` to:
 ```bash
 python {skill_dir}/scripts/generate.py <project_path>
 python {skill_dir}/scripts/generate.py <project_path> --force
+python {skill_dir}/scripts/generate.py <project_path> --read
+python {skill_dir}/scripts/generate.py <project_path> --read --task feature-delivery --query "skill lifecycle runtime"
+python {skill_dir}/scripts/generate.py <project_path> --read --task feature-delivery --query-escaped "\\u6280\\u80fd\\u7ba1\\u7406\\u5668\\u5982\\u4f55\\u5b9e\\u73b0"
+python {skill_dir}/scripts/generate.py <project_path> --read --task feature-delivery --query-file query.txt
+cat query.txt | python {skill_dir}/scripts/generate.py <project_path> --read --task feature-delivery --query-stdin
 cat {project}/repo/progress/miloya-codebase.json
 ```
+
+Windows-safe example:
+
+```powershell
+python {skill_dir}/scripts/generate.py <project_path> --read --task feature-delivery --query-escaped "\\u6280\\u80fd\\u7ba1\\u7406\\u5668\\u5982\\u4f55\\u5b9e\\u73b0"
+```
+
+When `--read` returns a payload with `searchScope`, `files`, `snippets`, and
+`nextHops`, treat those as the first-class search plan. Do not start with
+repo-wide search unless those hints are insufficient.
 
 ## Snapshot Output Schema
 
@@ -276,6 +309,95 @@ needs a fast reading order.
 - `workspace` and `contextHints` improve navigation for large repos and monorepos
 - `importantFiles` ranks the highest-signal files for model reading order
 - `representativeSnippets` provides short anchor snippets from those files
+
+## Snapshot Consumption Order
+
+When reading an existing snapshot or presenting a freshly generated one, consume
+the fields in this order:
+
+1. `summary`, `workspace`, `analysis`, `freshness`, `git`
+2. `contextHints`, `importantFiles`, `modules`
+3. `graph`, especially `stats`, `moduleDependencies`, `hotspots`, `packages`
+4. `contextPacks` and `retrieval`
+5. `externalContext`
+6. `representativeSnippets`, `apiRoutes`, `dataModels`, `keyFunctions`
+
+Do not stop after the overview layer. The engine is only useful when graph,
+task packs, and external context are surfaced to the user.
+
+## Response Contract
+
+When summarizing the snapshot for the user, always produce a Chinese report that
+uses the snapshot as evidence instead of improvising from file names alone.
+
+Minimum required sections:
+
+1. `项目定位`
+   - State the project type, main stack, repo/workspace shape, and whether the
+     conclusion is fact or inference.
+2. `架构边界`
+   - Explain the major runtime or package boundaries using `summary`,
+     `workspace`, `modules`, and `graph`.
+   - For Electron-style apps, explicitly call out `main` / `renderer` /
+     preload or extension boundaries when supported by the snapshot.
+3. `核心关系`
+   - Use `graph.moduleDependencies`, `graph.hotspots`, `importantFiles`, and
+     `entryPoints` to describe how the important modules connect.
+4. `任务入口`
+   - Surface at least 3 task-oriented reading paths from `contextPacks`.
+   - Preferred tasks: `understand-project`, `feature-delivery`,
+     `bugfix-investigation`, `code-review`, `onboarding`.
+5. `置信度与回退项`
+   - Report analyzer engines from `analysis.engines`
+   - Quote fallback reasons from `analysis.warnings`
+   - Distinguish high-confidence facts from heuristic inferences
+6. `补充上下文`
+   - Use `externalContext` to mention recent changes, docs, decisions, or team
+     conventions when available
+
+## Facts, Inference, and Fallback Rules
+
+- Label direct snapshot facts as `事实`
+- Label architecture or role judgments as `推断`
+- Label analyzer limitations as `回退`
+- Never invent reasons that are not supported by the snapshot
+- If TypeScript analysis falls back, do not say `缺少 tsconfig` unless the
+  snapshot explicitly proves that; prefer the exact warning from `analysis`
+- If the repo is dirty, mention it briefly but do not let it dominate the
+  summary unless the task is bugfix or review
+
+## Task-Oriented Presentation Rules
+
+When `contextPacks` are present, do not only list important files. Convert them
+into actionable reading guides:
+
+- `understand-project`: where a new model should start and why
+- `feature-delivery`: which files are likely to contain implementation patterns
+- `bugfix-investigation`: which files are close to recent changes or execution paths
+- `code-review`: which files form the immediate risk surface
+- `onboarding`: which files best explain conventions and structure
+
+Each task entry should include:
+
+- 1 sentence goal
+- 3-6 files
+- a brief `why these files` explanation using pack reasons, hotspots, or graph links
+
+## Output Quality Bar
+
+Avoid stopping at:
+
+- project name
+- tech stack
+- file count
+- a flat list of important files
+
+The final answer should help the next model understand:
+
+- where the architectural boundaries are
+- which modules are central
+- how to start reading for a specific task
+- which parts of the snapshot are high-confidence versus heuristic
 
 ## Storage
 

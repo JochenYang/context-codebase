@@ -96,11 +96,12 @@ def run_git_command(project_path: str, args: list[str]) -> str:
     return decode_subprocess_output(getattr(completed, 'stdout', b''))
 
 
-def decode_subprocess_output(payload: bytes | str | None) -> str:
+def decode_subprocess_output(payload: bytes | bytearray | memoryview | str | None) -> str:
     if payload is None:
         return ''
     if isinstance(payload, str):
         return payload
+    raw_payload = bytes(payload)
 
     encodings = []
     preferred = locale.getpreferredencoding(False)
@@ -115,8 +116,8 @@ def decode_subprocess_output(payload: bytes | str | None) -> str:
             continue
         seen.add(normalized)
         try:
-            return payload.decode(encoding)
+            return raw_payload.decode(encoding)
         except UnicodeDecodeError:
             continue
 
-    return payload.decode('utf-8', errors='replace')
+    return raw_payload.decode('utf-8', errors='replace')
