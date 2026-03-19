@@ -193,12 +193,27 @@ class GenerateSnapshotTests(unittest.TestCase):
         )
 
         self.assertEqual(payload["mode"], "read")
+        self.assertEqual(payload["responseMode"], "lightweight")
+        self.assertEqual(payload["packVersion"], "1.0")
+        self.assertEqual(payload["queryProfile"], "generic")
         self.assertEqual(payload["task"], "understand-project")
         self.assertTrue(payload["files"])
         self.assertTrue(payload["snippets"])
         self.assertIn("availableTasks", payload)
         self.assertIn("recommendedStart", payload["quickStart"])
         self.assertTrue(any(item["path"] == "README.md" for item in payload["files"]))
+        self.assertTrue(payload["constraints"]["preferLightweightAnswer"])
+        self.assertTrue(payload["constraints"]["avoidLongReport"])
+        self.assertTrue(payload["constraints"]["preferBriefImplementationSummary"])
+        self.assertEqual(payload["constraints"]["primaryGoal"], "locate-code-and-briefly-explain")
+        self.assertLessEqual(payload["constraints"]["maxFiles"], 5)
+        self.assertLessEqual(payload["constraints"]["maxSnippets"], 4)
+        self.assertIn("recommendedAnswerShape", payload)
+        self.assertEqual(payload["recommendedAnswerShape"]["style"], "brief-technical-answer")
+        self.assertIn("brief-flow", payload["recommendedAnswerShape"]["sections"])
+        self.assertEqual(payload["hostHints"]["outputStyle"], "lightweight-answer")
+        self.assertEqual(payload["hostHints"]["parentThreadAction"], "answer-from-pack")
+        self.assertEqual(payload["hostHints"]["preferredNarrative"], "locate-and-briefly-explain")
 
     def test_read_payload_query_returns_snippets_with_line_ranges(self) -> None:
         snapshot = GENERATE.generate_snapshot(str(self.temp_dir), force=True)
@@ -241,6 +256,56 @@ class GenerateSnapshotTests(unittest.TestCase):
         self.assertIn("repo/progress/", payload["searchScope"]["excludePaths"])
         self.assertIn("nextHops", payload)
         self.assertTrue(isinstance(payload["nextHops"], list))
+
+    def test_report_payload_returns_deep_pack_structure(self) -> None:
+        snapshot = GENERATE.generate_snapshot(str(self.temp_dir), force=True)
+        index_state = GENERATE.load_existing_index_state(
+            self.temp_dir / "repo" / "progress" / "miloya-codebase.index.json"
+        )
+
+        payload = GENERATE.build_report_payload(
+            snapshot=snapshot,
+            index_state=index_state,
+            task="feature-delivery",
+            query="skill download flow",
+        )
+
+        self.assertEqual(payload["mode"], "report")
+        self.assertEqual(payload["reportMode"], "deep-pack")
+        self.assertEqual(payload["reportPackVersion"], "1.0")
+        self.assertIn("coreFiles", payload)
+        self.assertIn("snippets", payload)
+        self.assertIn("flowAnchors", payload)
+        self.assertIn("constraints", payload)
+        self.assertTrue(payload["constraints"]["preferSubagent"])
+        self.assertTrue(payload["constraints"]["fallbackToMainThread"])
+        self.assertTrue(payload["constraints"]["delegationRequiredIfAvailable"])
+        self.assertFalse(payload["constraints"]["allowParentThreadExpansion"])
+        self.assertEqual(payload["constraints"]["parentThreadAction"], "stop-after-pack")
+        self.assertEqual(payload["hostHints"]["preferredExecution"], "subagent")
+        self.assertEqual(payload["hostHints"]["outputStyle"], "pack-only")
+        self.assertEqual(payload["hostHints"]["parentThreadAction"], "stop-after-pack")
+        self.assertTrue(payload["hostHints"]["delegationRequiredIfAvailable"])
+        self.assertFalse(payload["hostHints"]["allowParentThreadExpansion"])
+
+    def test_report_payload_recommends_sections_and_focus_modules(self) -> None:
+        snapshot = GENERATE.generate_snapshot(str(self.temp_dir), force=True)
+        index_state = GENERATE.load_existing_index_state(
+            self.temp_dir / "repo" / "progress" / "miloya-codebase.index.json"
+        )
+
+        payload = GENERATE.build_report_payload(
+            snapshot=snapshot,
+            index_state=index_state,
+            task="bugfix-investigation",
+            query="IM gateway delivery route",
+        )
+
+        self.assertIn("recommendedReportShape", payload)
+        self.assertIn("sections", payload["recommendedReportShape"])
+        self.assertIn("facts-vs-inference", payload["recommendedReportShape"]["sections"])
+        self.assertIn("call-chain", payload["recommendedReportShape"]["sections"])
+        self.assertTrue(isinstance(payload["focusModules"], list))
 
     def test_query_intent_recognizes_generic_flow_intents_even_with_mojibake_noise(self) -> None:
         intent = GENERATE.infer_query_intent("IM gateway im���� ��ϢͶ�� ·�� delivery route")
@@ -391,9 +456,109 @@ class GenerateSnapshotTests(unittest.TestCase):
         )
 
         self.assertEqual(payload["files"][0]["path"], "src/skillManager.ts")
+        self.assertEqual(payload["queryProfile"], "skill-runtime")
         self.assertEqual(payload["snippets"][0]["path"], "src/skillManager.ts")
         self.assertIn(payload["snippets"][0]["kind"], {"action-flow", "function"})
         self.assertTrue(any(anchor["type"] == "operation" for anchor in payload["flowAnchors"]))
+
+    def test_select_read_profile_defaults_to_generic(self) -> None:
+        profile = GENERATE.select_read_profile(
+            GENERATE.infer_query_intent("how does config persistence work")
+        )
+
+        self.assertEqual(profile["name"], "generic")
+
+    def test_select_read_profile_uses_skill_runtime_strategy(self) -> None:
+        profile = GENERATE.select_read_profile(
+            GENERATE.infer_query_intent("skill download flow")
+        )
+
+        self.assertEqual(profile["name"], "skill-runtime")
+        self.assertIn("skillmanager", profile["focusManagerTokens"])
+
+    def test_read_payload_skill_download_prefers_exact_anchor_and_core_chain(self) -> None:
+        (self.temp_dir / "src" / "main").mkdir(parents=True, exist_ok=True)
+        (self.temp_dir / "src" / "main" / "libs").mkdir(parents=True, exist_ok=True)
+        (self.temp_dir / "scripts").mkdir(parents=True, exist_ok=True)
+        (self.temp_dir / "src" / "main" / "skillManager.ts").write_text(
+            "\n".join(
+                [
+                    "export async function installSkill(source: string) {",
+                    "  return source;",
+                    "}",
+                    "",
+                    "export async function downloadSkill(source: string) {",
+                    "  return installSkill(source);",
+                    "}",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (self.temp_dir / "src" / "main" / "main.ts").write_text(
+            "\n".join(
+                [
+                    "import { downloadSkill } from './skillManager';",
+                    "export async function registerSkillHandlers() {",
+                    "  return downloadSkill('demo');",
+                    "}",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (self.temp_dir / "src" / "main" / "preload.ts").write_text(
+            "\n".join(
+                [
+                    "export const skillBridge = {",
+                    "  downloadSkill: (source: string) => source,",
+                    "};",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (self.temp_dir / "src" / "main" / "libs" / "pythonRuntime.ts").write_text(
+            "\n".join(
+                [
+                    "export async function setupPythonRuntime() {",
+                    "  return 'runtime';",
+                    "}",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (self.temp_dir / "scripts" / "setup-python-runtime.js").write_text(
+            "\n".join(
+                [
+                    "function setupPythonRuntime() {",
+                    "  return 'setup';",
+                    "}",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        snapshot = GENERATE.generate_snapshot(str(self.temp_dir), force=True)
+        index_state = GENERATE.load_existing_index_state(
+            self.temp_dir / "repo" / "progress" / "miloya-codebase.index.json"
+        )
+
+        payload = GENERATE.build_read_payload(
+            snapshot=snapshot,
+            index_state=index_state,
+            task="feature-delivery",
+            query="skill download flow",
+        )
+
+        self.assertEqual(payload["files"][0]["path"], "src/main/skillManager.ts")
+        self.assertTrue(any(item["path"] == "src/main/main.ts" for item in payload["files"]))
+        self.assertTrue(any(item["path"] == "src/main/preload.ts" for item in payload["files"]))
+        self.assertFalse(any(item["path"] == "src/main/libs/pythonRuntime.ts" for item in payload["files"]))
+        self.assertFalse(any(item["path"] == "scripts/setup-python-runtime.js" for item in payload["files"]))
+        self.assertEqual(payload["snippets"][0]["path"], "src/main/skillManager.ts")
+        self.assertIn("downloadSkill", payload["snippets"][0]["preview"])
+        self.assertNotIn("installSkill", payload["snippets"][0]["preview"].splitlines()[0])
+        self.assertLessEqual(len(payload["files"]), 4)
+        self.assertLessEqual(len(payload["snippets"]), 3)
+        self.assertLessEqual(len(payload["nextHops"]), 2)
 
     def test_runtime_query_returns_follow_up_paths(self) -> None:
         snapshot = {
