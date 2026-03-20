@@ -1,3 +1,5 @@
+.pytest_cache/
+repo/
 repo/progress/
 __pycache__/
 *.pyc
