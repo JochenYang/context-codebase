@@ -324,6 +324,39 @@ class GenerateSnapshotTests(unittest.TestCase):
         self.assertIn("download", intent["keywords"])
         self.assertIn("流程", intent["terms"])
 
+    def test_query_intent_expands_chinese_frame_rate_terms(self) -> None:
+        intent = GENERATE.infer_query_intent("帧率选择如何实现")
+
+        self.assertIn("parameter-selection", intent["labels"])
+        self.assertIn("ui-entry", intent["labels"])
+        self.assertIn("帧率", intent["keywords"])
+        self.assertIn("framerate", intent["keywords"])
+        self.assertIn("fps", intent["keywords"])
+        self.assertIn("max-fps", intent["keywords"])
+        self.assertIn("frame", intent["keywords"])
+        self.assertIn("rate", intent["keywords"])
+        self.assertIn("select", intent["keywords"])
+
+    def test_expand_query_terms_for_retrieval_uses_project_vocabulary(self) -> None:
+        query_intent = {
+            "terms": ["帧率", "选择"],
+            "keywords": ["帧率", "fps", "framerate", "select"],
+        }
+        retrieval = {
+            "projectVocabulary": {
+                "relatedTerms": {
+                    "framerate": ["display", "ispresetfps", "displaysettings"],
+                    "fps": ["getfpsvalue"],
+                }
+            }
+        }
+
+        expanded = GENERATE.expand_query_terms_for_retrieval(query_intent, retrieval)
+
+        self.assertIn("display", expanded)
+        self.assertIn("ispresetfps", expanded)
+        self.assertIn("getfpsvalue", expanded)
+
     def test_read_payload_query_can_hit_config_links_and_persist_flows(self) -> None:
         (self.temp_dir / "src" / "IMSettings.tsx").write_text(
             "\n".join(
@@ -559,6 +592,80 @@ class GenerateSnapshotTests(unittest.TestCase):
         self.assertLessEqual(len(payload["files"]), 4)
         self.assertLessEqual(len(payload["snippets"]), 3)
         self.assertLessEqual(len(payload["nextHops"]), 2)
+
+    def test_read_payload_chinese_query_bridges_to_frame_rate_chain(self) -> None:
+        (self.temp_dir / "src" / "pages").mkdir(parents=True, exist_ok=True)
+        (self.temp_dir / "src" / "types").mkdir(parents=True, exist_ok=True)
+        (self.temp_dir / "electron").mkdir(parents=True, exist_ok=True)
+        (self.temp_dir / "src" / "pages" / "DisplayPage.tsx").write_text(
+            "\n".join(
+                [
+                    "const isPresetFps = (value: number) => [30, 60, 90, 120, 144].includes(value);",
+                    "",
+                    "export function handleFrameRateChange(value: string) {",
+                    "  if (value === 'custom') return value;",
+                    "  return Number(value);",
+                    "}",
+                    "",
+                    "export function getFpsValue(frameRate: number) {",
+                    "  return isPresetFps(frameRate) ? String(frameRate) : 'custom';",
+                    "}",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (self.temp_dir / "electron" / "main.ts").write_text(
+            "\n".join(
+                [
+                    "export function buildScrcpyArgs(display: { frameRate?: number }) {",
+                    "  const args: string[] = [];",
+                    "  if (typeof display.frameRate === 'number' && display.frameRate > 0) {",
+                    "    args.push('--max-fps', String(display.frameRate));",
+                    "  }",
+                    "  return args;",
+                    "}",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (self.temp_dir / "src" / "types" / "electron.d.ts").write_text(
+            "\n".join(
+                [
+                    "export interface DisplaySettings {",
+                    "  frameRate: number;",
+                    "  customFrameRate: number;",
+                    "}",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        snapshot = GENERATE.generate_snapshot(str(self.temp_dir), force=True)
+        index_state = GENERATE.load_existing_index_state(
+            self.temp_dir / "repo" / "progress" / "miloya-codebase.index.json"
+        )
+
+        payload = GENERATE.build_read_payload(
+            snapshot=snapshot,
+            index_state=index_state,
+            task="feature-delivery",
+            query="帧率选择如何实现",
+        )
+
+        project_vocabulary = snapshot["retrieval"]["projectVocabulary"]["relatedTerms"]
+        self.assertTrue(any(token in project_vocabulary for token in ["fps", "frame", "rate"]))
+        related_frame_tokens = []
+        for token in ["fps", "frame", "rate"]:
+            related_frame_tokens.extend(project_vocabulary.get(token, []))
+        self.assertTrue(any(token in related_frame_tokens for token in ["display", "get", "preset"]))
+        self.assertEqual(payload["queryProfile"], "parameter-selection")
+        self.assertEqual(payload["files"][0]["path"], "src/pages/DisplayPage.tsx")
+        self.assertTrue(any(item["path"] == "electron/main.ts" for item in payload["files"]))
+        self.assertEqual(payload["snippets"][0]["path"], "src/pages/DisplayPage.tsx")
+        self.assertTrue(
+            "frameRate" in payload["snippets"][0]["preview"]
+            or "isPresetFps" in payload["snippets"][0]["preview"]
+        )
 
     def test_runtime_query_returns_follow_up_paths(self) -> None:
         snapshot = {

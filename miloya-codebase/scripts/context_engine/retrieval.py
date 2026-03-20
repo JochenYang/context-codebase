@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from collections import Counter
+from collections import Counter, defaultdict
 
 
 STOPWORDS = {
@@ -13,7 +13,8 @@ STOPWORDS = {
 ACTION_QUERY_TOKENS = {
     'download', 'install', 'delete', 'remove', 'load', 'sync', 'start',
     'stop', 'dispatch', 'route', 'reply', 'send', 'receive', 'create',
-    'update', 'fetch', 'clone', 'import', 'export', 'connect',
+    'update', 'fetch', 'clone', 'import', 'export', 'connect', 'select',
+    'change', 'choose', 'toggle', 'apply', 'set', '选择', '切换', '修改',
 }
 
 
@@ -54,12 +55,15 @@ def build_retrieval_artifacts(
         for item in graph.get('fileDependencies', [])
     }
 
+    project_vocabulary = build_project_vocabulary(chunks)
+
     retrieval = {
         'defaultTask': 'understand-project',
         'availableTasks': list(TASK_BLUEPRINTS.keys()),
         'strategies': ['keyword', 'graph-expansion', 'importance-boost', 'recent-change-boost'],
         'keywordVocabularySize': estimate_vocabulary(chunks),
         'chunkCount': len(chunks),
+        'projectVocabulary': project_vocabulary,
         'sampleQueries': [
             blueprint['query']
             for blueprint in TASK_BLUEPRINTS.values()
@@ -181,6 +185,49 @@ def retrieve_chunks(
     return selected[:limit]
 
 
+def build_project_vocabulary(chunks: list[dict]) -> dict:
+    token_counts = Counter()
+    cooccurrence: dict[str, Counter] = defaultdict(Counter)
+
+    for chunk in chunks:
+        chunk_tokens = sorted({
+            token
+            for token in tokenize(' '.join([
+                chunk['path'],
+                *chunk.get('signals', []),
+                chunk.get('preview', ''),
+            ]))
+            if len(token) >= 2
+        })
+        if not chunk_tokens:
+            continue
+        token_counts.update(chunk_tokens)
+        for token in chunk_tokens:
+            for related in chunk_tokens:
+                if related == token:
+                    continue
+                cooccurrence[token][related] += 1
+
+    top_terms = [
+        term
+        for term, _ in token_counts.most_common(160)
+    ]
+    related_terms = {}
+    for term in top_terms:
+        ranked_related = [
+            related
+            for related, _ in cooccurrence[term].most_common(10)
+            if related != term
+        ]
+        if ranked_related:
+            related_terms[term] = ranked_related[:6]
+
+    return {
+        'topTerms': top_terms[:160],
+        'relatedTerms': related_terms,
+    }
+
+
 def score_chunk(
     chunk: dict,
     query_tokens: set[str],
@@ -257,8 +304,10 @@ def estimate_vocabulary(chunks: list[dict]) -> int:
 
 
 def tokenize(text: str) -> set[str]:
+    text = re.sub(r'([a-z0-9])([A-Z])', r'\1 \2', text)
+    text = re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1 \2', text)
     return {
         token
-        for token in re.findall(r'[a-zA-Z0-9_./-]+', text.lower())
-        if len(token) >= 3 and token not in STOPWORDS
+        for token in re.findall(r'[A-Za-z][A-Za-z0-9_./-]*|[\u4e00-\u9fff]+|\d+', text.lower())
+        if len(token) >= 2 and token not in STOPWORDS
     }

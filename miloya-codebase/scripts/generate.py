@@ -868,6 +868,12 @@ def build_semantic_anchor_lines(record: dict, lines: list[str]) -> list[tuple[in
         'import',
         'export',
         'connect',
+        'select',
+        'change',
+        'choose',
+        'toggle',
+        'apply',
+        'set',
     ]
     patterns = [
         (r'https?://', 'link', ['url', 'link']),
@@ -1195,10 +1201,10 @@ def build_focus_context_pack(
     important_ranks = {item['path']: index for index, item in enumerate(important_files)}
     recent_changed = set(external_context.get('recentChangedFiles', []))
     query_intent = infer_query_intent(query)
-    expanded_query_terms = list(dict.fromkeys([
-        *query_intent.get('terms', []),
-        *query_intent.get('keywords', []),
-    ]))
+    expanded_query_terms = expand_query_terms_for_retrieval(
+        query_intent,
+        snapshot.get('retrieval', {}),
+    )
     expanded_query = ' '.join(expanded_query_terms) or query
     file_dependency_map = {
         item['path']: item['dependsOn']
@@ -1225,6 +1231,21 @@ def build_focus_context_pack(
         'matches': matches,
         'files': list(dict.fromkeys(related_paths))[:12],
     }
+
+
+def expand_query_terms_for_retrieval(query_intent: dict, retrieval: dict) -> list[str]:
+    expanded_terms = list(dict.fromkeys([
+        *query_intent.get('terms', []),
+        *query_intent.get('keywords', []),
+    ]))
+    related_terms = (retrieval.get('projectVocabulary') or {}).get('relatedTerms', {})
+
+    for term in list(expanded_terms):
+        for related in related_terms.get(term.lower(), [])[:4]:
+            if related not in expanded_terms:
+                expanded_terms.append(related)
+
+    return expanded_terms[:36]
 
 
 def build_read_payload(
@@ -1468,6 +1489,16 @@ GENERAL_QUERY_TERM_EXPANSIONS = {
     'skill': ['skills'],
     'skills': ['skill'],
     'plugin': ['plugins', 'extension'],
+    'display': ['screen', 'view', 'render'],
+    'screen': ['display', 'view'],
+    'encoder': ['codec'],
+    'codec': ['encoder'],
+    'fps': ['framerate', 'frame-rate', 'max-fps', 'frame', 'rate'],
+    'framerate': ['fps', 'frame-rate', 'max-fps', 'frame', 'rate'],
+    'bitrate': ['rate'],
+    'resolution': ['width', 'height', 'size'],
+    'select': ['selector', 'option', 'choose', 'preset', 'change'],
+    'change': ['select', 'option', 'preset'],
     'runtime': ['flow', 'lifecycle', 'engine', 'adapter'],
     'lifecycle': ['runtime', 'flow'],
     'download': ['install', 'fetch', 'clone', 'archive', 'zip'],
@@ -1496,6 +1527,16 @@ GENERAL_QUERY_TERM_EXPANSIONS = {
     '类型': ['type', 'types', 'interface', 'schema', 'model'],
     '界面': ['ui', 'component', 'page', 'view'],
     '组件': ['component', 'ui', 'view'],
+    '显示': ['display', 'screen', 'view'],
+    '帧率': ['fps', 'framerate', 'max-fps', 'frame', 'rate'],
+    '编码器': ['encoder', 'codec'],
+    '码率': ['bitrate', 'rate'],
+    '比特率': ['bitrate', 'rate'],
+    '分辨率': ['resolution', 'width', 'height', 'size'],
+    '选择': ['select', 'selector', 'option', 'choose', 'preset', 'change'],
+    '选项': ['option', 'select', 'preset'],
+    '预设': ['preset', 'option', 'select'],
+    '切换': ['toggle', 'switch', 'change', 'select'],
     '运行时': ['runtime', 'engine', 'adapter', 'flow'],
     '生命周期': ['lifecycle', 'runtime', 'flow'],
     '流程': ['flow', 'process', 'pipeline', 'lifecycle'],
@@ -1517,9 +1558,22 @@ GENERAL_QUERY_TERM_EXPANSIONS = {
 GENERAL_QUERY_ACTION_TERMS = {
     'download', 'install', 'delete', 'remove', 'load', 'read', 'list', 'scan',
     'discover', 'parse', 'resolve', 'sync', 'start', 'stop', 'save', 'persist',
-    'dispatch', 'delivery', 'send', 'receive', 'reply',
+    'dispatch', 'delivery', 'send', 'receive', 'reply', 'select', 'change',
+    'choose', 'toggle', 'apply', 'set',
     '下载', '安装', '删除', '读取', '加载', '解析', '同步', '启动', '停止', '保存',
-    '持久化', '分发', '投递', '发送', '接收', '回复',
+    '持久化', '分发', '投递', '发送', '接收', '回复', '选择', '切换', '修改', '设置',
+}
+
+PARAMETER_SELECTION_TERMS = {
+    'fps', 'framerate', 'frame-rate', 'max-fps',
+    'bitrate', 'rate', 'resolution', 'width', 'height', 'size',
+    'encoder', 'codec', 'display', 'screen',
+    '帧率', '码率', '比特率', '分辨率', '编码器', '显示',
+}
+
+UI_SELECTION_TERMS = {
+    'select', 'selector', 'option', 'choose', 'preset', 'change', 'toggle',
+    '设置', '选择', '选项', '预设', '切换', '修改',
 }
 
 
@@ -1633,6 +1687,7 @@ def select_read_profile(query_intent: dict) -> dict:
         'name': 'generic',
         'focusManagerTokens': set(),
         'focusEntrySuffixes': set(),
+        'preferPathTokens': set(),
         'suppressPathTokens': [],
         'boostSymbolTerms': set(),
         'penalizeSymbolTerms': set(),
@@ -1643,12 +1698,25 @@ def select_read_profile(query_intent: dict) -> dict:
             'name': 'skill-runtime',
             'focusManagerTokens': {'skillmanager', 'pluginmanager'},
             'focusEntrySuffixes': {'main.ts', 'preload.ts'},
+            'preferPathTokens': set(),
             'suppressPathTokens': [
                 '/libs/:runtime',
                 '/scripts/:setup',
             ],
             'boostSymbolTerms': exact_terms & {'download', 'install', 'remove', 'delete'},
             'penalizeSymbolTerms': {'install', 'setup'} - exact_terms,
+        })
+    elif 'parameter-selection' in query_intent.get('labels', []):
+        profile.update({
+            'name': 'parameter-selection',
+            'focusManagerTokens': set(),
+            'focusEntrySuffixes': {'main.ts', 'preload.ts'},
+            'preferPathTokens': {'/pages/', '/components/', 'display', 'settings', 'encoding', 'screen'},
+            'suppressPathTokens': [],
+            'boostSymbolTerms': keyword_set & (
+                PARAMETER_SELECTION_TERMS | {'select', 'change', 'option', 'preset'}
+            ),
+            'penalizeSymbolTerms': set(),
         })
 
     return profile
@@ -1870,6 +1938,10 @@ def score_path_with_profile(path: str, query_intent: dict, read_profile: dict) -
         if token in lowered:
             score += 42
 
+    for token in read_profile.get('preferPathTokens', set()):
+        if token in lowered:
+            score += 26
+
     for suffix in read_profile.get('focusEntrySuffixes', set()):
         if lowered.endswith('/' + suffix) or lowered.endswith(suffix):
             score += 20 if suffix == 'main.ts' else 18
@@ -1928,6 +2000,11 @@ def refine_read_file_paths(snapshot: dict, file_paths: list[str], query_intent: 
             return
         used.add(normalized)
         preferred.append(normalized)
+
+    for path in deduped:
+        lowered = path.lower()
+        if any(token in lowered for token in read_profile.get('preferPathTokens', set())):
+            add_path(path)
 
     for path in deduped:
         lowered = path.lower()
@@ -2102,8 +2179,10 @@ def infer_query_intent_framework(query: str | None) -> dict:
         labels.append('persistence-flow')
     if keyword_set & {'type', 'types', 'interface', 'schema', 'model', '类型'}:
         labels.append('type-definition')
-    if keyword_set & {'ui', 'component', 'page', 'view', '界面', '组件'}:
+    if keyword_set & ({'ui', 'component', 'page', 'view', '界面', '组件'} | UI_SELECTION_TERMS | {'display', 'screen'}):
         labels.append('ui-entry')
+    if keyword_set & PARAMETER_SELECTION_TERMS:
+        labels.append('parameter-selection')
     if keyword_set & {'runtime', 'lifecycle', 'flow', 'process', 'pipeline', '运行时', '生命周期', '流程'}:
         labels.append('runtime-flow')
     if keyword_set & {'skill', 'skills', 'plugin', 'plugins'} and keyword_set & GENERAL_QUERY_ACTION_TERMS:
@@ -2227,6 +2306,10 @@ def score_match_with_profile(path: str, symbol_terms: set[str], query_intent: di
     for token in read_profile.get('focusManagerTokens', set()):
         if token in lowered:
             bonus += 32
+
+    for token in read_profile.get('preferPathTokens', set()):
+        if token in lowered:
+            bonus += 22
 
     for suffix in read_profile.get('focusEntrySuffixes', set()):
         if lowered.endswith('/' + suffix) or lowered.endswith(suffix):
