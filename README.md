@@ -1,38 +1,197 @@
 # miloya-codebase
 
-`miloya-codebase` is a professional project context engine for large repositories.
+<p align="center">
+  <strong>Language</strong><br/>
+  <a href="./README.md">English</a> ·
+  <a href="./README_zh.md">简体中文</a>
+</p>
 
-It generates a reusable snapshot at `repo/progress/miloya-codebase.json` so a new
-model, a new IDE session, or another tool can understand a codebase quickly
-without rescanning the entire repository from scratch.
+`miloya-codebase` is a project context engine for fast repository orientation,
+cached handoff, and task-focused code retrieval.
 
-This is not a plain file-tree exporter. It is designed to answer the questions a
-model actually needs at handoff time:
+It generates reusable artifacts under `repo/progress/` so a new model, a new
+IDE session, or another tool can understand a codebase quickly without
+rescanning the whole repository every time.
+
+## What It Solves
+
+Most repo summary tools stop at file trees, language counts, or symbol lists.
+That is usually not enough for practical model handoff.
+
+`miloya-codebase` is built to answer the questions that matter during a real
+session:
 
 - What kind of project is this?
 - Which files should be read first?
-- Which modules carry the highest architectural signal?
-- Is the existing snapshot still fresh enough to reuse?
+- Which areas define the architecture?
+- Can the current snapshot be reused safely?
+- For a focused question, which files and anchors should be read next?
 
-## Positioning
+## Artifacts
 
-Most repository summary tools stop at file trees, symbol lists, or simple
-language counts. That is not enough for fast model onboarding in a real project.
+The skill writes reusable outputs to:
 
-`miloya-codebase` adds a navigation layer on top of structural scanning:
+- `repo/progress/miloya-codebase.json`
+- `repo/progress/miloya-codebase.index.json`
 
-- project summary and technology stack detection
-- workspace and monorepo hints
-- read-order guidance for high-signal files
-- representative snippets for quick anchoring
-- snapshot freshness and source fingerprinting
-- cache reuse for faster follow-up sessions
+These artifacts are designed for model consumption first, not just human
+inspection.
 
-The goal is practical context transfer, not compiler-grade static analysis.
+## Quick Start
+
+Use the mode that matches the question you need answered:
+
+- `/miloya-codebase`: build or reuse a snapshot for high-level orientation
+- `/miloya-codebase refresh`: force a fresh scan after meaningful repo changes
+- `/miloya-codebase read`: answer a focused implementation question quickly
+- `/miloya-codebase report`: prepare a deeper host-side technical walkthrough
+
+## Modes
+
+### `/miloya-codebase`
+
+Default mode.
+
+Behavior:
+
+- generates a snapshot when none exists
+- reuses the cached snapshot when the source fingerprint is unchanged
+- returns a repo overview optimized for fast understanding
+
+Use it when:
+
+- entering a project for the first time
+- switching models or IDEs
+- rebuilding a high-level mental map of the repo
+
+### `/miloya-codebase refresh`
+
+Force-refresh mode.
+
+Behavior:
+
+- ignores cache reuse
+- rescans the repository
+- overwrites the existing snapshot
+
+Use it when:
+
+- the codebase changed significantly
+- the current snapshot is stale
+- you explicitly want a fresh scan
+
+### `/miloya-codebase read`
+
+Focused retrieval mode.
+
+Behavior:
+
+- consumes the existing snapshot and index
+- skips forced regeneration
+- returns a lightweight retrieval payload with:
+  - `files`
+  - `snippets`
+  - `flowAnchors`
+  - `nextHops`
+  - `searchScope`
+  - `hotspots`
+  - `externalContext`
+
+Use it when:
+
+- the snapshot already exists
+- you need a quick answer for a specific implementation question
+- you want to preserve tokens and avoid a full rescan
+
+`read` is optimized for quick implementation summaries:
+
+- lead with the core conclusion
+- show the call entry when available
+- surface 3-4 core files
+- surface 3-5 anchors worth reading next
+- stop before it turns into a long technical report
+
+### `/miloya-codebase report`
+
+Deep-analysis mode.
+
+Behavior:
+
+- consumes the existing snapshot and index when available
+- generates the snapshot first only if it is missing
+- returns a `deep-pack` for host-side deep report generation
+
+Use it when:
+
+- you want a full technical walkthrough
+- you need a broader call chain or architecture trace
+- you want to keep the parent thread lightweight and delegate the deeper work
+
+## Why It Is More Useful Than A File Tree
+
+A file tree tells you where files exist.
+
+A context engine should also tell you:
+
+- where a model should start
+- which files are worth the tokens
+- which modules carry the strongest architectural signal
+- whether the saved context is still valid
+- how to approach a concrete task without opening the whole repository
+
+That is the main difference this skill is designed around.
+
+## Snapshot Contents
+
+The snapshot and index expose several layers of context:
+
+- `summary`: project identity, tech stack, entry points, dominant languages
+- `workspace`: monorepo and package layout hints
+- `analysis`: analyzer engines, warnings, and fallback details
+- `contextHints`: recommended start file, read order, high-signal areas
+- `importantFiles`: ranked files worth reading first
+- `chunkCatalog`: reusable anchors for retrieval
+- `graph`: dependency edges, module relationships, hotspots
+- `retrieval`: task list, retrieval metadata, project vocabulary
+- `contextPacks`: prebuilt task-oriented reading packs
+- `externalContext`: recent changes, docs, conventions
+- `apiRoutes`, `dataModels`, `keyFunctions`: extracted code structure
+- `freshness` and `sourceFingerprint`: cache safety and reuse checks
+
+## Retrieval Model
+
+`miloya-codebase` uses a hybrid retrieval flow instead of plain grep or a pure
+embedding-backed semantic search stack:
+
+- snapshot and index reuse
+- chunk-based keyword retrieval
+- graph-aware expansion
+- important-file boosting
+- task-oriented read packs
+- multilingual query expansion
+- project-vocabulary-driven term expansion
+
+This makes `read` fast enough for handoff workflows while still being useful
+for focused implementation questions.
 
 ## Installation
 
-Minimum required files:
+This repository keeps the distributable skill under `./miloya-codebase/`.
+
+Repository layout in this repo:
+
+```text
+.
+├─ README.md
+├─ README_zh.md
+└─ miloya-codebase/
+   ├─ SKILL.md
+   ├─ scripts/
+   ├─ tests/
+   └─ references/
+```
+
+Packaged or installed skill layout:
 
 ```text
 miloya-codebase/
@@ -48,316 +207,37 @@ miloya-codebase/
   SKILL.md
   scripts/
     generate.py
+    context_engine/
   tests/
     test_generate.py
+  references/
   README.md
   README_zh.md
 ```
 
-Do not include:
+Keep generated outputs out of versioned source where possible:
 
 - `repo/progress/`
+- `node_modules/`
+- `dist/`
+- `build/`
 - `__pycache__/`
 - `*.pyc`
 
-## Skill Usage
-
-This is intentionally a single-skill design.
-
-Use:
-
-```text
-/miloya-codebase
-/miloya-codebase refresh
-/miloya-codebase read
-```
-
-### `/miloya-codebase`
-
-Default mode.
-
-Behavior:
-
-- generates a new snapshot if one does not exist
-- reuses the existing snapshot if the source fingerprint is unchanged
-- returns project context optimized for fast model understanding
-
-Recommended when:
-
-- entering a project for the first time
-- switching to another model or IDE
-- refreshing your mental map of the repository
-
-### `/miloya-codebase refresh`
-
-Force regeneration mode.
-
-Behavior:
-
-- ignores cache reuse
-- rescans the project
-- overwrites the existing snapshot
-
-Recommended when:
-
-- the codebase changed materially
-- you want to avoid stale context
-- you suspect the current snapshot is insufficient
-
-### `/miloya-codebase read`
-
-Read-only mode.
-
-Behavior:
-
-- loads the existing snapshot directly
-- skips forced regeneration
-
-Recommended when:
-
-- the snapshot already exists
-- you want the fastest possible handoff
-- you changed tools or sessions but not the repository
-
 ## Manual Script Usage
+
+From this repository root, use:
 
 ```bash
 python miloya-codebase/scripts/generate.py <project_path>
 python miloya-codebase/scripts/generate.py <project_path> --force
+python miloya-codebase/scripts/generate.py <project_path> --read
+python miloya-codebase/scripts/generate.py <project_path> --read --task feature-delivery --query "skill download flow"
+python miloya-codebase/scripts/generate.py <project_path> --report --task bugfix-investigation --query "message routing"
 ```
 
-The generated artifact is written to:
-
-```text
-<project>/repo/progress/miloya-codebase.json
-```
-
-## What The Snapshot Contains
-
-The snapshot is built for model consumption, not just human inspection.
-
-Primary sections:
-
-- `summary`: project identity, type, dominant languages, important paths, entry points
-- `workspace`: monorepo detection, root manifests, package layout
-- `analysis`: analyzer engines used, fallback usage, analysis warnings
-- `index`: local index-state metadata, chunk counts, and change delta
-- `chunkCatalog`: top chunk anchors for retrieval and context packing
-- `contextHints`: recommended start file, read order, high-signal areas
-- `fileTree`: normalized project tree, including root files under `./`
-- `modules`: top-level responsibility summaries
-- `dependencies`: root manifest dependencies when detectable
-- `importantFiles`: ranked files that are worth reading first
-- `graph`: file dependency graph, module relationships, symbol index, hotspots
-- `retrieval`: available retrieval tasks, strategies, and query hints
-- `contextPacks`: prebuilt task-focused context bundles
-- `externalContext`: recent commits, changed files, documentation, conventions
-- `representativeSnippets`: short anchor snippets from those files
-- `apiRoutes`: extracted route definitions
-- `dataModels`: extracted models and type definitions
-- `keyFunctions`: important named functions with file and line anchors
-- `architecture`: inferred architecture style
-- `sourceFingerprint`: content fingerprint used for cache reuse
-- `freshness`: whether the snapshot is stale
-- `git`: current branch, commit, and working tree status when available
-
-## Example Snapshot Outline
-
-```json
-{
-  "version": "3.0",
-  "generatedAt": "2026-03-18T14:09:58+00:00",
-  "projectPath": "D:/codes/example",
-  "sourceFingerprint": "sha256...",
-  "freshness": {
-    "stale": false,
-    "reason": "source fingerprint unchanged",
-    "newestSourceMtime": "2026-03-18T14:09:36+00:00",
-    "snapshotPath": "repo/progress/miloya-codebase.json"
-  },
-  "git": {
-    "branch": "main",
-    "commit": "abc123",
-    "status": "clean"
-  },
-  "summary": {
-    "name": "example",
-    "type": "Backend Service",
-    "description": "Short README-derived project summary",
-    "techStack": ["Express", "TypeScript"],
-    "entryPoints": ["src/index.ts"],
-    "totalFiles": 234,
-    "totalLines": 12840,
-    "dominantLanguages": [{"language": "TypeScript", "files": 180}],
-    "importantPaths": ["package.json", "src/index.ts"]
-  },
-  "workspace": {
-    "isMonorepo": false,
-    "rootManifests": ["package.json"],
-    "packages": []
-  },
-  "analysis": {
-    "engines": {
-      "Python": "python-ast",
-      "TypeScript": "typescript-regex-fallback"
-    },
-    "filesByEngine": {
-      "python-ast": 3,
-      "typescript-regex-fallback": 6
-    },
-    "warnings": ["typescript compiler unavailable; used regex fallback"]
-  },
-  "index": {
-    "stateVersion": "1.0",
-    "statePath": "repo/progress/miloya-codebase.index.json",
-    "fileCount": 234,
-    "chunkCount": 980,
-    "reusedSnapshot": false,
-    "delta": {
-      "newFiles": 2,
-      "changedFiles": 4,
-      "removedFiles": 0,
-      "unchangedFiles": 228
-    }
-  },
-  "contextHints": {
-    "readOrder": ["package.json", "src/index.ts"],
-    "recommendedStart": "package.json",
-    "highSignalAreas": ["src/", "src/routes/"],
-    "monorepo": false
-  },
-  "importantFiles": [
-    {
-      "path": "src/index.ts",
-      "role": "API surface",
-      "language": "TypeScript",
-      "lines": 150,
-      "imports": ["express", "router"],
-      "exports": ["app", "router"],
-      "score": 152,
-      "whyImportant": "entry point, API surface"
-    }
-  ],
-  "chunkCatalog": [
-    {
-      "id": "src/index.ts#function:10-32:abc123",
-      "path": "src/index.ts",
-      "kind": "function",
-      "language": "TypeScript",
-      "startLine": 10,
-      "endLine": 32,
-      "signals": ["bootstrap"],
-      "preview": "export async function bootstrap() { ... }"
-    }
-  ],
-  "graph": {
-    "stats": {
-      "files": 234,
-      "symbols": 540,
-      "dependencyEdges": 620
-    }
-  },
-  "retrieval": {
-    "defaultTask": "understand-project",
-    "availableTasks": ["understand-project", "feature-delivery", "bugfix-investigation", "code-review", "onboarding"]
-  },
-  "contextPacks": {
-    "understand-project": {
-      "task": "understand-project",
-      "files": ["README.md", "src/index.ts"]
-    }
-  },
-  "externalContext": {
-    "recentCommits": [],
-    "documentationSources": ["README.md"]
-  },
-  "representativeSnippets": [
-    {
-      "path": "src/index.ts",
-      "reason": "route definition",
-      "startLine": 1,
-      "endLine": 12,
-      "snippet": "import express from 'express'..."
-    }
-  ],
-  "modules": {
-    "src/": "Primary application source code; 200 files; routes: 15; models: 30",
-    "src/routes/": "HTTP or application routing definitions; 15 files"
-  },
-  "apiRoutes": [],
-  "dataModels": [],
-  "keyFunctions": [],
-  "architecture": "MVC / Controller-based"
-}
-```
-
-## Why This Is Better Than A Plain File Tree
-
-A plain file tree answers where files exist.
-
-A context engine should answer:
-
-- where a model should start
-- which files are worth the tokens
-- which areas define the application shape
-- whether the existing context can be trusted
-
-That difference is what this skill is optimized for.
-
-## Core Behaviors
-
-- excludes generated and vendor noise such as `.git`, `node_modules`, `dist`,
-  `build`, `__pycache__`, and `repo/progress`
-- avoids self-referential snapshots by excluding its own output directory
-- uses Python AST for Python semantic extraction
-- uses the TypeScript compiler AST for JS/TS when available in the analyzed
-  project, otherwise records an explicit regex fallback warning
-- maintains a local index-state file and chunk catalog for incremental reuse
-- builds a dependency graph, retrieval metadata, and task-oriented context packs
-- captures recent git history and documentation sources as external context
-- removes common source-code comments before fallback extraction to reduce
-  false positives
-- normalizes all paths to relative POSIX-style paths
-- skips oversized files to control snapshot size
-- detects common monorepo signals such as `apps/`, `packages/`,
-  `pnpm-workspace.yaml`, `turbo.json`, and `nx.json`
-- reuses an existing snapshot when the content fingerprint is unchanged
-- invalidates the cache when source files or schema version change
-
-## Important File Ranking
-
-`importantFiles` are ranked with a multi-signal heuristic. Higher scores are
-assigned to:
-
-- entry points and startup files
-- root manifests and major configuration files
-- files with routes, models, exports, and integration boundaries
-- files likely to define API surface or core domain flow
-
-Lower scores are assigned to:
-
-- test files
-- support-only files
-- low-signal leaf utilities
-
-This is what makes the output materially more useful than a tree dump.
-
-## Detection Coverage
-
-Current detection includes:
-
-- JavaScript and TypeScript ecosystem detection: React, Next.js, Vue, NestJS,
-  Express, Angular, Svelte
-- Python ecosystem detection: FastAPI, Flask, Django, Pydantic, SQLAlchemy
-- Go: Gin
-- Java: Spring Boot
-- Other ecosystem markers: Maven, Gradle, Cargo
-
-Semantic extraction depth is currently strongest for:
-
-- Python: AST-backed imports, models, routes, and key functions
-- JavaScript / TypeScript: TypeScript-compiler AST when available, otherwise
-  regex fallback with explicit warning in `analysis`
+If the skill is installed elsewhere, replace `miloya-codebase/` with the
+actual skill directory.
 
 ## Accuracy Boundary
 
@@ -366,20 +246,26 @@ This tool is optimized for practical context transfer.
 It is strong at:
 
 - fast repository orientation
-- read-order suggestion
-- handoff between models, sessions, and IDEs
-- large-project navigation
+- cached model handoff
+- high-signal reading order
+- focused code retrieval
+- large-repo navigation
 
-It is not yet a full cross-language AST-first semantic indexer. Some extraction
-still relies on regex and heuristics, especially when a JS/TS AST compiler is
-not available in the analyzed project, which means edge cases can still produce
-misses or partial misclassification.
+It is not designed to be:
 
-That tradeoff is intentional for speed and portability.
+- a compiler-grade cross-language indexer
+- a replacement for exact repo search in every case
+- an embedding-backed semantic search engine
+
+Some extraction still depends on heuristics or regex fallback, especially when
+JS/TS AST analysis is unavailable in the analyzed project.
+
+In other words, this tool is designed to get a model oriented fast and point it
+at the right code, not to replace exact search in every edge case.
 
 ## Development And Validation
 
-Run tests:
+Run tests with:
 
 ```bash
 python -m unittest miloya-codebase.tests.test_generate
@@ -388,35 +274,36 @@ python -m unittest miloya-codebase.tests.test_generate
 Current validation covers:
 
 - self-reference exclusion
-- comment-based false-positive route prevention
-- Python AST extraction for async functions and dataclasses
-- explicit JS/TS fallback reporting when no TypeScript compiler is available
-- local index-state and chunk catalog generation
-- task-focused context-pack retrieval
-- relative-path normalization
-- richer schema presence
-- cache reuse when source fingerprint is unchanged
-- regeneration when source files change
+- route false-positive prevention
+- Python AST extraction
+- JS/TS fallback reporting
+- snapshot reuse and invalidation
+- chunk and index generation
+- task-oriented retrieval
+- read/report payload structure
+- multilingual query expansion
 
-## Status
+## Current Status
 
-Current implementation is suitable for real context-engine usage in active
+The current implementation is suitable for active context-engine use in real
 projects:
 
-- corrected major correctness issues from the original scanner
-- added snapshot freshness and source fingerprinting
-- added navigation-focused schema for large-project understanding
-- added local index-state, chunking, dependency graph, retrieval metadata, and context packs
-- added regression tests for core behavior
+- reusable snapshot and index generation
+- graph-aware retrieval and task packs
+- `read` for lightweight implementation lookup
+- `report` for deep-pack generation
+- regression coverage for core behaviors
 
 ## Limitations
 
-- route, model, and function extraction are still heuristic in some languages
-- `read` is a skill usage mode, not a standalone script subcommand
-- retrieval is hybrid and graph-aware, but not embedding-backed semantic search yet
-- absolute precision is not the design goal; usable project understanding is
-  the design goal
+- some route, model, and function extraction is still heuristic
+- `read` is a skill mode, not a full replacement for exact code search
+- retrieval quality is high for common flows, but long-tail domain language can
+  still benefit from direct repo search
+- the design target is practical, reusable understanding rather than absolute
+  precision
 
 ## License
 
-Use according to the host repository's license and internal distribution rules.
+Use this skill according to the host repository's license and internal
+distribution rules.

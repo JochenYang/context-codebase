@@ -1,12 +1,12 @@
 ---
 name: miloya-codebase
-description: Professional project context engine. Usage: /miloya-codebase [refresh|read|report]
+description: Project context engine for repo orientation, cached handoff, and task-focused code retrieval. Usage: /miloya-codebase [refresh|read|report]
 ---
 
 # miloya-codebase
 
-Professional project context engine for fast repo understanding, model handoff,
-and task-oriented code retrieval.
+Project context engine for fast repo orientation, cached handoff, and
+task-focused code retrieval.
 
 Artifacts:
 
@@ -20,7 +20,7 @@ Use this skill when you need to:
 - understand a codebase quickly
 - refresh a reusable project snapshot
 - retrieve focused files and snippets for a concrete question
-- prepare a deep technical report from a cached project context
+- prepare a deep technical walkthrough from a cached project context
 
 ## Modes
 
@@ -194,6 +194,9 @@ On Windows or any environment where non-ASCII query text may become mojibake:
 - Avoid raw `--query` for non-ASCII input when the shell is unreliable
 
 ## Manual Script Usage
+
+Replace `{skill_dir}` with the actual installed skill path. In this repository,
+that path is `miloya-codebase/`.
 
 ```bash
 python {skill_dir}/scripts/generate.py <project_path>

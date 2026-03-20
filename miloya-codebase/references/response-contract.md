@@ -1,5 +1,12 @@
 # Response Contract
 
+This contract keeps `read` and overview answers aligned with the same product
+boundary used in the README and SKILL docs:
+
+- `read` = quick implementation summary
+- project overview = high-signal repo orientation
+- `report` = deeper host-side expansion from `deep-pack`
+
 Use this reference when summarizing the snapshot for a user or turning a
 `read` payload into an explanation.
 

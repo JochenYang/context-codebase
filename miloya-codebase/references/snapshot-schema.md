@@ -3,6 +3,13 @@
 Use this reference when you need field-level details about the generated
 snapshot or retrieval payload.
 
+Positioning reminder:
+
+- snapshot = reusable repo context artifact
+- `read` = retrieval payload built from snapshot and index
+- `report` = `deep-pack` built from snapshot and index
+- none of these modes imply a full rescan unless the mode explicitly requires it
+
 ## Snapshot Path
 
 - Snapshot: `{project}/repo/progress/miloya-codebase.json`
@@ -110,8 +117,8 @@ consume fields in this order:
 5. `externalContext`
 6. `representativeSnippets`, `apiRoutes`, `dataModels`, `keyFunctions`
 
-Do not stop at the overview layer. The engine is only useful when graph,
-task packs, and external context are surfaced.
+Do not stop at the overview layer. The engine is most useful when graph,
+task packs, and external context are surfaced together.
 
 ## Output Notes
 
@@ -121,4 +128,3 @@ task packs, and external context are surfaced.
 - `freshness` and `sourceFingerprint` determine whether a cached snapshot can be reused safely
 - `importantFiles` ranks the highest-signal files for model reading order
 - `representativeSnippets` provides short anchor snippets from those files
-

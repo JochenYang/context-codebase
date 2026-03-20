@@ -5,6 +5,12 @@ Use this reference when the host runs `/miloya-codebase report`.
 `report` should return a `deep-pack` rather than a finished essay. The pack is
 the stable boundary between the context engine and the host.
 
+Boundary reminder:
+
+- `read` should stop at a quick implementation summary
+- `report` should stop at a structured `deep-pack` when delegation is available
+- the host decides whether to expand the pack into a longer report
+
 ## Minimum Expected Fields
 
 - `mode=report`
@@ -57,4 +63,3 @@ Typical pack constraints include:
 - preserve parent-thread tokens
 - keep file, snippet, anchor, and next-hop counts bounded
 - prefer returning summary first
-
