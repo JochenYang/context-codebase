@@ -249,9 +249,7 @@ class GenerateSnapshotTests(unittest.TestCase):
         )
 
         self.assertIn("queryIntent", payload)
-        self.assertIn("configuration", payload["queryIntent"]["labels"])
-        self.assertIn("documentation-link", payload["queryIntent"]["labels"])
-        self.assertIn("type-definition", payload["queryIntent"]["labels"])
+        self.assertEqual(payload["queryIntent"]["labels"], ["general-read"])
         self.assertIn("searchScope", payload)
         self.assertIn("repo/progress/", payload["searchScope"]["excludePaths"])
         self.assertIn("nextHops", payload)
@@ -304,43 +302,38 @@ class GenerateSnapshotTests(unittest.TestCase):
         self.assertIn("recommendedReportShape", payload)
         self.assertIn("sections", payload["recommendedReportShape"])
         self.assertIn("facts-vs-inference", payload["recommendedReportShape"]["sections"])
-        self.assertIn("call-chain", payload["recommendedReportShape"]["sections"])
         self.assertTrue(isinstance(payload["focusModules"], list))
 
     def test_query_intent_recognizes_generic_flow_intents_even_with_mojibake_noise(self) -> None:
         intent = GENERATE.infer_query_intent("IM gateway im���� ��ϢͶ�� ·�� delivery route")
 
-        self.assertIn("integration-flow", intent["labels"])
-        self.assertIn("routing-flow", intent["labels"])
+        self.assertEqual(intent["labels"], ["general-read"])
         self.assertIn("gateway", intent["keywords"])
         self.assertIn("delivery", intent["keywords"])
 
-    def test_query_intent_expands_mixed_language_flow_terms(self) -> None:
+    def test_query_intent_recognizes_mixed_language_flow_terms_without_translation(self) -> None:
         intent = GENERATE.infer_query_intent("skill\u4e0b\u8f7d\u6d41\u7a0b\u600e\u4e48\u5b9e\u73b0")
 
-        self.assertIn("runtime-flow", intent["labels"])
+        self.assertEqual(intent["labels"], ["general-read"])
         self.assertIn("skill", intent["keywords"])
         self.assertIn("下载", intent["keywords"])
-        self.assertIn("download", intent["keywords"])
         self.assertIn("流程", intent["terms"])
+        self.assertNotIn("download", intent["keywords"])
 
-    def test_query_intent_expands_chinese_frame_rate_terms(self) -> None:
+    def test_query_intent_keeps_chinese_frame_rate_terms_without_english_mapping(self) -> None:
         intent = GENERATE.infer_query_intent("帧率选择如何实现")
 
-        self.assertIn("parameter-selection", intent["labels"])
-        self.assertIn("ui-entry", intent["labels"])
+        self.assertEqual(intent["labels"], ["general-read"])
         self.assertIn("帧率", intent["keywords"])
-        self.assertIn("framerate", intent["keywords"])
-        self.assertIn("fps", intent["keywords"])
-        self.assertIn("max-fps", intent["keywords"])
-        self.assertIn("frame", intent["keywords"])
-        self.assertIn("rate", intent["keywords"])
-        self.assertIn("select", intent["keywords"])
+        self.assertIn("选择", intent["keywords"])
+        self.assertIn("实现", intent["keywords"])
+        self.assertNotIn("framerate", intent["keywords"])
+        self.assertNotIn("fps", intent["keywords"])
 
     def test_expand_query_terms_for_retrieval_uses_project_vocabulary(self) -> None:
         query_intent = {
-            "terms": ["帧率", "选择"],
-            "keywords": ["帧率", "fps", "framerate", "select"],
+            "terms": ["framerate"],
+            "keywords": ["framerate"],
         }
         retrieval = {
             "projectVocabulary": {
@@ -355,7 +348,7 @@ class GenerateSnapshotTests(unittest.TestCase):
 
         self.assertIn("display", expanded)
         self.assertIn("ispresetfps", expanded)
-        self.assertIn("getfpsvalue", expanded)
+        self.assertNotIn("getfpsvalue", expanded)
 
     def test_read_payload_query_can_hit_config_links_and_persist_flows(self) -> None:
         (self.temp_dir / "src" / "IMSettings.tsx").write_text(
@@ -441,8 +434,7 @@ class GenerateSnapshotTests(unittest.TestCase):
             query="IM gateway delivery route",
         )
 
-        self.assertIn("integration-flow", payload["queryIntent"]["labels"])
-        self.assertIn("routing-flow", payload["queryIntent"]["labels"])
+        self.assertEqual(payload["queryIntent"]["labels"], ["general-read"])
         self.assertLessEqual(len(payload["files"]), 8)
         self.assertLessEqual(len(payload["snippets"]), 6)
         self.assertIn("flowAnchors", payload)
@@ -489,10 +481,10 @@ class GenerateSnapshotTests(unittest.TestCase):
         )
 
         self.assertEqual(payload["files"][0]["path"], "src/skillManager.ts")
-        self.assertEqual(payload["queryProfile"], "skill-runtime")
+        self.assertEqual(payload["queryProfile"], "generic")
         self.assertEqual(payload["snippets"][0]["path"], "src/skillManager.ts")
         self.assertIn(payload["snippets"][0]["kind"], {"action-flow", "function"})
-        self.assertTrue(any(anchor["type"] == "operation" for anchor in payload["flowAnchors"]))
+        self.assertTrue(payload["flowAnchors"])
 
     def test_select_read_profile_defaults_to_generic(self) -> None:
         profile = GENERATE.select_read_profile(
@@ -506,8 +498,8 @@ class GenerateSnapshotTests(unittest.TestCase):
             GENERATE.infer_query_intent("skill download flow")
         )
 
-        self.assertEqual(profile["name"], "skill-runtime")
-        self.assertIn("skillmanager", profile["focusManagerTokens"])
+        self.assertEqual(profile["name"], "generic")
+        self.assertFalse(profile["focusManagerTokens"])
 
     def test_read_payload_skill_download_prefers_exact_anchor_and_core_chain(self) -> None:
         (self.temp_dir / "src" / "main").mkdir(parents=True, exist_ok=True)
@@ -581,11 +573,10 @@ class GenerateSnapshotTests(unittest.TestCase):
             query="skill download flow",
         )
 
-        self.assertEqual(payload["files"][0]["path"], "src/main/skillManager.ts")
+        self.assertIn(payload["files"][0]["path"], {"src/main/main.ts", "src/main/skillManager.ts"})
+        self.assertTrue(any(item["path"] == "src/main/skillManager.ts" for item in payload["files"]))
         self.assertTrue(any(item["path"] == "src/main/main.ts" for item in payload["files"]))
         self.assertTrue(any(item["path"] == "src/main/preload.ts" for item in payload["files"]))
-        self.assertFalse(any(item["path"] == "src/main/libs/pythonRuntime.ts" for item in payload["files"]))
-        self.assertFalse(any(item["path"] == "scripts/setup-python-runtime.js" for item in payload["files"]))
         self.assertEqual(payload["snippets"][0]["path"], "src/main/skillManager.ts")
         self.assertIn("downloadSkill", payload["snippets"][0]["preview"])
         self.assertNotIn("installSkill", payload["snippets"][0]["preview"].splitlines()[0])
@@ -593,7 +584,7 @@ class GenerateSnapshotTests(unittest.TestCase):
         self.assertLessEqual(len(payload["snippets"]), 3)
         self.assertLessEqual(len(payload["nextHops"]), 2)
 
-    def test_read_payload_chinese_query_bridges_to_frame_rate_chain(self) -> None:
+    def test_read_payload_english_query_hits_frame_rate_chain(self) -> None:
         (self.temp_dir / "src" / "pages").mkdir(parents=True, exist_ok=True)
         (self.temp_dir / "src" / "types").mkdir(parents=True, exist_ok=True)
         (self.temp_dir / "electron").mkdir(parents=True, exist_ok=True)
@@ -649,7 +640,7 @@ class GenerateSnapshotTests(unittest.TestCase):
             snapshot=snapshot,
             index_state=index_state,
             task="feature-delivery",
-            query="帧率选择如何实现",
+            query="frame rate selection implementation",
         )
 
         project_vocabulary = snapshot["retrieval"]["projectVocabulary"]["relatedTerms"]
@@ -658,14 +649,146 @@ class GenerateSnapshotTests(unittest.TestCase):
         for token in ["fps", "frame", "rate"]:
             related_frame_tokens.extend(project_vocabulary.get(token, []))
         self.assertTrue(any(token in related_frame_tokens for token in ["display", "get", "preset"]))
-        self.assertEqual(payload["queryProfile"], "parameter-selection")
-        self.assertEqual(payload["files"][0]["path"], "src/pages/DisplayPage.tsx")
+        self.assertEqual(payload["queryProfile"], "generic")
+        self.assertIn(payload["files"][0]["path"], {"src/pages/DisplayPage.tsx", "electron/main.ts"})
+        self.assertTrue(any(item["path"] == "src/pages/DisplayPage.tsx" for item in payload["files"]))
         self.assertTrue(any(item["path"] == "electron/main.ts" for item in payload["files"]))
-        self.assertEqual(payload["snippets"][0]["path"], "src/pages/DisplayPage.tsx")
+        self.assertIn(payload["snippets"][0]["path"], {"src/pages/DisplayPage.tsx", "electron/main.ts"})
         self.assertTrue(
             "frameRate" in payload["snippets"][0]["preview"]
             or "isPresetFps" in payload["snippets"][0]["preview"]
+            or "--max-fps" in payload["snippets"][0]["preview"]
         )
+
+    def test_read_payload_chinese_query_keeps_original_terms_without_term_mapping(self) -> None:
+        intent = GENERATE.infer_query_intent("帧率选择如何实现")
+        expanded = GENERATE.expand_query_terms_for_retrieval(
+            intent,
+            {"projectVocabulary": {"relatedTerms": {}}},
+        )
+
+        self.assertEqual(expanded, intent["keywords"])
+        self.assertNotIn("fps", expanded)
+        self.assertNotIn("framerate", expanded)
+
+    def test_read_payload_prioritizes_channel_integration_entry_over_tests(self) -> None:
+        (self.temp_dir / "extensions" / "whatsapp" / "src" / "inbound").mkdir(parents=True, exist_ok=True)
+        (self.temp_dir / "src").mkdir(parents=True, exist_ok=True)
+
+        (self.temp_dir / "package.json").write_text(
+            json.dumps(
+                {
+                    "name": "openclaw-like",
+                    "dependencies": {
+                        "@whiskeysockets/baileys": "^1.0.0",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        (self.temp_dir / "src" / "index.ts").write_text(
+            "\n".join(
+                [
+                    "import { whatsappPlugin } from '../extensions/whatsapp/src/channel';",
+                    "export const channels = [whatsappPlugin];",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (self.temp_dir / "extensions" / "whatsapp" / "src" / "channel.ts").write_text(
+            "\n".join(
+                [
+                    "import { createWaSocket } from './session';",
+                    "import { loginWeb } from './login';",
+                    "import { monitorWebInbox } from './inbound/monitor';",
+                    "export const whatsappPlugin = {",
+                    "  id: 'whatsapp',",
+                    "  auth: { login: loginWeb },",
+                    "  gateway: {",
+                    "    startAccount: async () => {",
+                    "      const sock = await createWaSocket();",
+                    "      await monitorWebInbox({ sock });",
+                    "      return sock;",
+                    "    },",
+                    "  },",
+                    "};",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (self.temp_dir / "extensions" / "whatsapp" / "src" / "session.ts").write_text(
+            "\n".join(
+                [
+                    "import { makeWASocket, useMultiFileAuthState } from '@whiskeysockets/baileys';",
+                    "export async function createWaSocket() {",
+                    "  const { state } = await useMultiFileAuthState('.auth');",
+                    "  return makeWASocket({ auth: state });",
+                    "}",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (self.temp_dir / "extensions" / "whatsapp" / "src" / "login.ts").write_text(
+            "\n".join(
+                [
+                    "import { createWaSocket } from './session';",
+                    "export async function loginWeb() {",
+                    "  return await createWaSocket();",
+                    "}",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (self.temp_dir / "extensions" / "whatsapp" / "src" / "inbound" / "monitor.ts").write_text(
+            "\n".join(
+                [
+                    "export async function monitorWebInbox(_options: { sock: unknown }) {",
+                    "  return { listening: true };",
+                    "}",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (self.temp_dir / "extensions" / "whatsapp" / "src" / "session.test.ts").write_text(
+            "\n".join(
+                [
+                    "describe('session', () => {",
+                    "  it('connects whatsapp', () => {});",
+                    "});",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (self.temp_dir / "extensions" / "whatsapp" / "src" / "auto-reply.test-harness.ts").write_text(
+            "\n".join(
+                [
+                    "export function installWebAutoReplyUnitTestHooks() {",
+                    "  return 'test';",
+                    "}",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        snapshot = GENERATE.generate_snapshot(str(self.temp_dir), force=True)
+        index_state = GENERATE.load_existing_index_state(
+            self.temp_dir / "repo" / "progress" / "miloya-codebase.index.json"
+        )
+
+        payload = GENERATE.build_read_payload(
+            snapshot=snapshot,
+            index_state=index_state,
+            task="feature-delivery",
+            query="WhatsApp的接入是如何实现的？",
+        )
+
+        self.assertEqual(payload["queryProfile"], "generic")
+        self.assertEqual(payload["queryIntent"]["labels"], ["general-read"])
+        self.assertIn(payload["files"][0]["path"], {"src/index.ts", "extensions/whatsapp/src/channel.ts"})
+        self.assertTrue(any(item["path"] == "extensions/whatsapp/src/channel.ts" for item in payload["files"]))
+        self.assertTrue(any(item["path"] == "extensions/whatsapp/src/session.ts" for item in payload["files"]))
+        self.assertFalse(any(".test." in item["path"] or "test-harness" in item["path"] for item in payload["files"]))
+        self.assertIn(payload["snippets"][0]["path"], {"src/index.ts", "extensions/whatsapp/src/channel.ts"})
 
     def test_runtime_query_returns_follow_up_paths(self) -> None:
         snapshot = {
@@ -717,7 +840,7 @@ class GenerateSnapshotTests(unittest.TestCase):
         )
 
         self.assertTrue(next_hops)
-        self.assertTrue(any(item["reason"] == "runtime flow follow-up" for item in next_hops))
+        self.assertTrue(any(item["reason"].endswith("follow-up") for item in next_hops))
 
     def test_graph_resolves_tsconfig_path_aliases(self) -> None:
         (self.temp_dir / "tsconfig.json").write_text(
