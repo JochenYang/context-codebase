@@ -33,6 +33,8 @@ The skill writes reusable outputs to:
 
 - `repo/progress/miloya-codebase.json`
 - `repo/progress/miloya-codebase.index.json`
+- `repo/progress/miloya-codebase.graph.json`
+- `repo/progress/miloya-codebase.changes.json`
 
 These artifacts are designed for model consumption first, not just human
 inspection.
@@ -42,6 +44,8 @@ inspection.
 Use the mode that matches the question you need answered:
 
 - `/miloya-codebase`: build or reuse a snapshot for high-level orientation
+- `python ... generate.py <project_path> --incremental`: perform a safe
+  lightweight update when prior index data exists
 - `/miloya-codebase refresh`: force a fresh scan after meaningful repo changes
 - `/miloya-codebase read`: answer a focused implementation question quickly
 - `/miloya-codebase report`: prepare a deeper host-side technical walkthrough
@@ -56,6 +60,7 @@ Behavior:
 
 - generates a snapshot when none exists
 - reuses the cached snapshot when the source fingerprint is unchanged
+- supports safe `--incremental` rebuilds when the previous index is compatible
 - returns a repo overview optimized for fast understanding
 
 Use it when:
@@ -96,6 +101,8 @@ Behavior:
   - `searchScope`
   - `hotspots`
   - `externalContext`
+- uses persisted graph and change state when available to improve candidate
+  context and follow-up paths
 
 Use it when:
 
@@ -152,6 +159,8 @@ The snapshot and index expose several layers of context:
 - `importantFiles`: ranked files worth reading first
 - `chunkCatalog`: reusable anchors for retrieval
 - `graph`: dependency edges, module relationships, hotspots
+- `graph.json`: persisted graph state for dependency and `nextHops` reuse
+- `changes.json`: recent changed files, recent commits, and update metadata
 - `retrieval`: task list, retrieval metadata, project vocabulary
 - `contextPacks`: prebuilt task-oriented reading packs
 - `externalContext`: recent changes, docs, conventions
@@ -164,12 +173,12 @@ The snapshot and index expose several layers of context:
 embedding-backed semantic search stack:
 
 - snapshot and index reuse
+- safe incremental rebuilds
 - chunk-based keyword retrieval
 - graph-aware expansion
 - important-file boosting
 - task-oriented read packs
-- multilingual query expansion
-- project-vocabulary-driven term expansion
+- recent-change awareness
 
 This makes `read` fast enough for handoff workflows while still being useful
 for focused implementation questions.
@@ -230,6 +239,7 @@ From this repository root, use:
 
 ```bash
 python miloya-codebase/scripts/generate.py <project_path>
+python miloya-codebase/scripts/generate.py <project_path> --incremental
 python miloya-codebase/scripts/generate.py <project_path> --force
 python miloya-codebase/scripts/generate.py <project_path> --read
 python miloya-codebase/scripts/generate.py <project_path> --read --task feature-delivery --query "skill download flow"
@@ -278,10 +288,10 @@ Current validation covers:
 - Python AST extraction
 - JS/TS fallback reporting
 - snapshot reuse and invalidation
+- incremental rebuilds and persisted graph/change state
 - chunk and index generation
 - task-oriented retrieval
 - read/report payload structure
-- multilingual query expansion
 
 ## Current Status
 
@@ -289,7 +299,9 @@ The current implementation is suitable for active context-engine use in real
 projects:
 
 - reusable snapshot and index generation
+- safe incremental updates
 - graph-aware retrieval and task packs
+- persisted graph and change-tracker artifacts
 - `read` for lightweight implementation lookup
 - `report` for deep-pack generation
 - regression coverage for core behaviors

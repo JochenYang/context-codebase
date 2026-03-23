@@ -31,6 +31,8 @@ skill 会生成并复用以下文件：
 
 - `repo/progress/miloya-codebase.json`
 - `repo/progress/miloya-codebase.index.json`
+- `repo/progress/miloya-codebase.graph.json`
+- `repo/progress/miloya-codebase.changes.json`
 
 这些产物首先是给模型消费的，不只是给人类查看。
 
@@ -39,6 +41,7 @@ skill 会生成并复用以下文件：
 按问题类型选择模式即可：
 
 - `/miloya-codebase`：生成或复用快照，用于建立整体认知
+- `python ... generate.py <项目路径> --incremental`：在已有索引可用时做安全的轻量更新
 - `/miloya-codebase refresh`：在仓库明显变化后强制重扫
 - `/miloya-codebase read`：快速回答具体实现问题
 - `/miloya-codebase report`：为宿主侧生成更深入的技术分析输入
@@ -53,6 +56,7 @@ skill 会生成并复用以下文件：
 
 - 快照不存在时生成新快照
 - 源码指纹未变化时复用已有快照
+- 在已有索引兼容时支持安全的 `--incremental` 轻量重建
 - 返回适合快速理解仓库的高层概览
 
 适用场景：
@@ -93,6 +97,7 @@ skill 会生成并复用以下文件：
   - `searchScope`
   - `hotspots`
   - `externalContext`
+- 在可用时结合持久化 graph 和 change tracker 提升候选上下文与 follow-up 质量
 
 适用场景：
 
@@ -149,6 +154,8 @@ skill 会生成并复用以下文件：
 - `importantFiles`：优先阅读文件
 - `chunkCatalog`：可复用的检索锚点
 - `graph`：依赖关系、模块关系、热点区域
+- `graph.json`：持久化的 graph 状态，用于依赖关系和 `nextHops` 复用
+- `changes.json`：最近改动文件、最近提交和更新元数据
 - `retrieval`：任务列表、检索元数据、项目词汇表
 - `contextPacks`：按任务预构建的阅读包
 - `externalContext`：最近变更、文档、团队约定
@@ -161,12 +168,12 @@ skill 会生成并复用以下文件：
 检索流程：
 
 - 快照与索引复用
+- 安全的增量重建
 - 基于 chunk 的关键词召回
 - 图扩展
 - 高价值文件加权
 - 面向任务的阅读包
-- 多语言 query 扩展
-- 基于项目词汇表的本地术语扩展
+- 最近改动感知
 
 这让 `read` 在保持轻量的同时，仍然能回答不少具体实现问题。
 
@@ -226,6 +233,7 @@ miloya-codebase/
 
 ```bash
 python miloya-codebase/scripts/generate.py <项目路径>
+python miloya-codebase/scripts/generate.py <项目路径> --incremental
 python miloya-codebase/scripts/generate.py <项目路径> --force
 python miloya-codebase/scripts/generate.py <项目路径> --read
 python miloya-codebase/scripts/generate.py <项目路径> --read --task feature-delivery --query "skill download flow"
@@ -272,17 +280,19 @@ python -m unittest miloya-codebase.tests.test_generate
 - Python AST 提取
 - JS/TS fallback 报告
 - 快照复用与失效
+- 增量重建与 graph/change state 持久化
 - chunk 与索引生成
 - 任务定向检索
 - read/report payload 结构
-- 多语言 query 扩展
 
 ## 当前状态
 
 当前实现已经适合真实项目里的 context-engine 场景：
 
 - 可复用快照和索引生成
+- 安全的增量更新
 - 图感知检索与任务包
+- 持久化的 graph 与 change-tracker 产物
 - `read` 用于轻量实现定位
 - `report` 用于 deep-pack 生成
 - 核心行为已有回归测试

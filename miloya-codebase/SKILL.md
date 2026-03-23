@@ -26,6 +26,8 @@ Artifacts:
 
 - Snapshot: `{project}/repo/progress/miloya-codebase.json`
 - Index state: `{project}/repo/progress/miloya-codebase.index.json`
+- Graph state: `{project}/repo/progress/miloya-codebase.graph.json`
+- Change tracker: `{project}/repo/progress/miloya-codebase.changes.json`
 
 These files are stored inside the target project, under `repo/progress/`.
 
@@ -72,6 +74,7 @@ Behavior:
 
 - Generate a new snapshot when none exists
 - Reuse the cached snapshot when the source fingerprint is unchanged
+- Support `--incremental` for safe lightweight updates when prior index data is available
 - Return a project overview optimized for fast model understanding
 
 Use it when:
@@ -111,6 +114,8 @@ Behavior:
   - `searchScope`
   - `hotspots`
   - `externalContext`
+- Use graph and recent-change state when available to improve `nextHops` and
+  candidate context quality
 
 Use it when:
 
@@ -194,6 +199,8 @@ The entrypoint is always `scripts/generate.py`, but the mode determines whether
 source code is scanned or cached artifacts are consumed:
 
 - default mode: may generate a snapshot or reuse a cached one
+- `--incremental`: rebuild safely from the current project state using prior
+  index data when possible, and fall back to a full rebuild when not safe
 - `refresh`: always rescans and overwrites the cached snapshot
 - `read`: consumes the existing snapshot and index to build a retrieval payload
 - `report`: consumes the existing snapshot and index to build a `deep-pack`
@@ -243,6 +250,7 @@ that path is `miloya-codebase/`.
 
 ```bash
 python {skill_dir}/scripts/generate.py <project_path>
+python {skill_dir}/scripts/generate.py <project_path> --incremental
 python {skill_dir}/scripts/generate.py <project_path> --force
 python {skill_dir}/scripts/generate.py <project_path> --read
 python {skill_dir}/scripts/generate.py <project_path> --read --task feature-delivery --query "skill lifecycle runtime"

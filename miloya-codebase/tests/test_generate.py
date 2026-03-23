@@ -134,6 +134,24 @@ class GenerateSnapshotTests(unittest.TestCase):
         self.assertIn("chunkCatalog", snapshot)
         self.assertIn("graph", snapshot)
         self.assertIn("retrieval", snapshot)
+        self.assertIn("changeTracker", snapshot)
+
+    def test_snapshot_writes_graph_and_change_tracker_files(self) -> None:
+        snapshot = GENERATE.generate_snapshot(str(self.temp_dir), force=True)
+
+        graph_state = json.loads(
+            (self.temp_dir / "repo" / "progress" / "miloya-codebase.graph.json").read_text(encoding="utf-8")
+        )
+        change_state = json.loads(
+            (self.temp_dir / "repo" / "progress" / "miloya-codebase.changes.json").read_text(encoding="utf-8")
+        )
+
+        self.assertEqual(graph_state["sourceFingerprint"], snapshot["sourceFingerprint"])
+        self.assertIn("fileDependencies", graph_state)
+        self.assertIn("reverseFileDependencies", graph_state)
+        self.assertEqual(change_state["sourceFingerprint"], snapshot["sourceFingerprint"])
+        self.assertIn("delta", change_state)
+        self.assertEqual(change_state["mode"], "full")
 
     def test_read_query_input_prefers_utf8_query_file(self) -> None:
         query_file = self.temp_dir / "query.txt"
@@ -842,6 +860,34 @@ class GenerateSnapshotTests(unittest.TestCase):
         self.assertTrue(next_hops)
         self.assertTrue(any(item["reason"].endswith("follow-up") for item in next_hops))
 
+    def test_next_hops_include_reverse_dependencies_and_recent_changes(self) -> None:
+        snapshot = {
+            "summary": {"entryPoints": []},
+            "importantFiles": [],
+            "graph": {
+                "hotspots": [],
+                "fileDependencies": [
+                    {"path": "src/feature.ts", "dependsOn": ["src/shared.ts"]},
+                ],
+                "reverseFileDependencies": [
+                    {"path": "src/shared.ts", "usedBy": ["src/feature.ts"]},
+                ],
+                "pathIndex": [],
+            },
+            "externalContext": {"recentChangedFiles": ["src/recent.ts"]},
+            "changeTracker": {"recentChangedFiles": ["src/recent.ts"]},
+        }
+
+        next_hops = GENERATE.build_read_next_hops(
+            snapshot=snapshot,
+            file_paths=["src/shared.ts"],
+            snippet_items=[{"path": "src/shared.ts"}],
+            query_intent=GENERATE.infer_query_intent("shared module"),
+        )
+
+        self.assertTrue(any(item["path"] == "src/feature.ts" and item["reason"] == "matched file dependent" for item in next_hops))
+        self.assertTrue(any(item["path"] == "src/recent.ts" and item["reason"] == "recently changed follow-up" for item in next_hops))
+
     def test_graph_resolves_tsconfig_path_aliases(self) -> None:
         (self.temp_dir / "tsconfig.json").write_text(
             json.dumps(
@@ -1043,6 +1089,46 @@ class GenerateSnapshotTests(unittest.TestCase):
         self.assertIn(("POST", "/real"), {(item["method"], item["path"]) for item in second["apiRoutes"]})
         self.assertEqual(second["index"]["delta"]["changedFiles"], 1)
         self.assertFalse(second["index"]["reusedSnapshot"])
+
+    def test_incremental_snapshot_updates_changed_file_and_persists_change_tracker(self) -> None:
+        GENERATE.generate_snapshot(str(self.temp_dir), force=True)
+
+        time.sleep(1.1)
+        (self.temp_dir / "src" / "web.ts").write_text(
+            "\n".join(
+                [
+                    "import express from 'express';",
+                    "import { Settings } from './models';",
+                    "const router = express.Router();",
+                    "",
+                    "export const loadUsers = async () => new Settings();",
+                    "router.get('/users', loadUsers);",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        snapshot = GENERATE.generate_snapshot(str(self.temp_dir), incremental=True)
+        index_state = json.loads(
+            (self.temp_dir / "repo" / "progress" / "miloya-codebase.index.json").read_text(encoding="utf-8")
+        )
+        graph_state = json.loads(
+            (self.temp_dir / "repo" / "progress" / "miloya-codebase.graph.json").read_text(encoding="utf-8")
+        )
+        change_state = json.loads(
+            (self.temp_dir / "repo" / "progress" / "miloya-codebase.changes.json").read_text(encoding="utf-8")
+        )
+
+        self.assertEqual(snapshot["freshness"]["reason"], "incremental update")
+        self.assertEqual(snapshot["index"]["delta"]["changedFiles"], 1)
+        self.assertEqual(change_state["mode"], "incremental")
+        self.assertEqual(index_state["files"]["src/web.ts"]["imports"], ["./models", "express"])
+        self.assertTrue(
+            any(
+                item["path"] == "src/models.py" and "src/web.ts" in item["usedBy"]
+                for item in graph_state["reverseFileDependencies"]
+            )
+        )
 
     def test_read_query_input_can_decode_escaped_query(self) -> None:
         value = GENERATE.read_query_input(None, "\\u6280\\u80fd\\u4e0b\\u8f7d\\u6d41\\u7a0b", None, False)

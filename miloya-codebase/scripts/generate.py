@@ -32,6 +32,8 @@ except ModuleNotFoundError:  # pragma: no cover
 
 SNAPSHOT_VERSION = '3.0'
 INDEX_STATE_VERSION = '1.0'
+GRAPH_STATE_VERSION = '1.0'
+CHANGE_TRACKER_VERSION = '1.0'
 MAX_TEXT_FILE_BYTES = 512 * 1024
 MAX_IMPORTANT_FILES = 15
 MAX_REPRESENTATIVE_SNIPPETS = 5
@@ -39,6 +41,7 @@ MAX_SNIPPET_LINES = 12
 MAX_CHUNK_LINES = 60
 MAX_CHUNK_PREVIEW_LINES = 16
 MAX_CHUNK_CATALOG_ITEMS = 40
+MAX_INCREMENTAL_CHANGED_FILES = 64
 
 EXCLUDE_DIRS = {
     'node_modules', '.git', 'dist', 'build', 'venv', '__pycache__',
@@ -972,6 +975,21 @@ def load_existing_index_state(index_state_file: Path) -> dict | None:
         return None
 
 
+def load_json_state(state_file: Path) -> dict | None:
+    if not state_file.exists():
+        return None
+
+    try:
+        return json.loads(state_file.read_text(encoding='utf-8'))
+    except Exception:
+        return None
+
+
+def save_json_state(state_file: Path, payload: dict) -> None:
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    state_file.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding='utf-8')
+
+
 def diff_index_state(previous_state: dict | None, current_signatures: dict[str, dict]) -> dict:
     previous_files = (previous_state or {}).get('files', {})
     previous_paths = set(previous_files.keys())
@@ -1059,10 +1077,18 @@ def save_index_state(
     for record in file_records:
         files_payload[record['path']] = {
             **current_signatures.get(record['path'], {}),
+            'fileName': record['fileName'],
             'language': record['language'],
             'lineCount': record['lineCount'],
             'analysisEngine': record.get('analysisEngine'),
             'analysisConfidence': record.get('analysisConfidence'),
+            'imports': record.get('imports', []),
+            'exports': record.get('exports', []),
+            'apiRoutes': record.get('apiRoutes', []),
+            'dataModels': record.get('dataModels', []),
+            'keyFunctions': record.get('keyFunctions', []),
+            'frameworkHints': record.get('frameworkHints', []),
+            'analysisWarnings': record.get('analysisWarnings', []),
             'chunkIds': chunk_ids_by_path.get(record['path'], []),
         }
 
@@ -1086,6 +1112,183 @@ def load_existing_snapshot(output_file: Path) -> dict | None:
         return json.loads(output_file.read_text(encoding='utf-8'))
     except Exception:
         return None
+
+
+def can_incrementally_rebuild(
+    previous_state: dict | None,
+    current_signatures: dict[str, dict],
+) -> bool:
+    if not previous_state:
+        return False
+
+    previous_files = previous_state.get('files', {})
+    required_keys = {
+        'fileName',
+        'language',
+        'lineCount',
+        'imports',
+        'exports',
+        'apiRoutes',
+        'dataModels',
+        'keyFunctions',
+        'frameworkHints',
+        'analysisWarnings',
+    }
+
+    for path in current_signatures.keys() & previous_files.keys():
+        if not required_keys.issubset(previous_files.get(path, {}).keys()):
+            return False
+
+    return True
+
+
+def collect_changed_paths(previous_state: dict | None, current_signatures: dict[str, dict]) -> tuple[set[str], set[str], set[str]]:
+    previous_files = (previous_state or {}).get('files', {})
+    previous_paths = set(previous_files.keys())
+    current_paths = set(current_signatures.keys())
+
+    new_paths = current_paths - previous_paths
+    removed_paths = previous_paths - current_paths
+    shared_paths = current_paths & previous_paths
+    changed_paths = {
+        path for path in shared_paths
+        if {
+            'sizeBytes': previous_files.get(path, {}).get('sizeBytes'),
+            'mtimeNs': previous_files.get(path, {}).get('mtimeNs'),
+        } != current_signatures.get(path, {})
+    }
+    return new_paths, changed_paths, removed_paths
+
+
+def rebuild_file_records_from_index_state(
+    previous_state: dict | None,
+    current_signatures: dict[str, dict],
+    changed_records: list[dict],
+    removed_paths: set[str],
+) -> list[dict]:
+    changed_map = {record['path']: record for record in changed_records}
+    previous_files = (previous_state or {}).get('files', {})
+    file_records = []
+
+    for path, metadata in previous_files.items():
+        if path in removed_paths or path not in current_signatures or path in changed_map:
+            continue
+        signature = current_signatures.get(path, {})
+        file_records.append({
+            'path': path,
+            'fileName': metadata.get('fileName') or Path(path).name,
+            'language': metadata.get('language'),
+            'lineCount': metadata.get('lineCount', 0),
+            'sizeBytes': signature.get('sizeBytes', metadata.get('sizeBytes', 0)),
+            'content': None,
+            'imports': metadata.get('imports', []),
+            'exports': metadata.get('exports', []),
+            'apiRoutes': metadata.get('apiRoutes', []),
+            'dataModels': metadata.get('dataModels', []),
+            'keyFunctions': metadata.get('keyFunctions', []),
+            'frameworkHints': metadata.get('frameworkHints', []),
+            'analysisEngine': metadata.get('analysisEngine'),
+            'analysisConfidence': metadata.get('analysisConfidence'),
+            'analysisWarnings': metadata.get('analysisWarnings', []),
+        })
+
+    file_records.extend(changed_records)
+    file_records.sort(key=lambda item: item['path'])
+    return file_records
+
+
+def merge_chunks_for_incremental(
+    previous_state: dict | None,
+    changed_records: list[dict],
+    removed_paths: set[str],
+) -> list[dict]:
+    changed_paths = {record['path'] for record in changed_records}
+    retained_chunks = [
+        chunk for chunk in (previous_state or {}).get('chunks', [])
+        if chunk.get('path') not in removed_paths and chunk.get('path') not in changed_paths
+    ]
+    updated_chunks = build_chunks(changed_records)
+    merged = retained_chunks + updated_chunks
+    return sorted(merged, key=lambda item: (item['path'], item['startLine'], item['id']))
+
+
+def hydrate_record_contents(
+    file_records: list[dict],
+    project_path: str,
+    target_paths: set[str],
+) -> list[dict]:
+    if not target_paths:
+        return file_records
+
+    base = Path(project_path)
+    hydrated = []
+    for record in file_records:
+        if record['path'] not in target_paths or record.get('content') is not None:
+            hydrated.append(record)
+            continue
+
+        next_record = dict(record)
+        next_record['content'] = read_text_file(base / record['path'])
+        hydrated.append(next_record)
+
+    return hydrated
+
+
+def save_graph_state(graph_state_file: Path, graph: dict, source_fingerprint: str) -> None:
+    payload = {
+        'version': GRAPH_STATE_VERSION,
+        'generatedAt': utc_now_iso(),
+        'sourceFingerprint': source_fingerprint,
+        **graph,
+    }
+    save_json_state(graph_state_file, payload)
+
+
+def build_change_tracker(
+    source_fingerprint: str,
+    delta: dict,
+    external_context: dict,
+    mode: str,
+) -> dict:
+    return {
+        'version': CHANGE_TRACKER_VERSION,
+        'generatedAt': utc_now_iso(),
+        'lastScan': utc_now_iso(),
+        'sourceFingerprint': source_fingerprint,
+        'mode': mode,
+        'delta': delta,
+        'recentCommits': external_context.get('recentCommits', [])[:12],
+        'recentChangedFiles': external_context.get('recentChangedFiles', [])[:40],
+    }
+
+
+def save_change_tracker(change_tracker_file: Path, payload: dict) -> None:
+    save_json_state(change_tracker_file, payload)
+
+
+def attach_progress_states(snapshot: dict, graph_state: dict | None, change_tracker: dict | None) -> dict:
+    enriched = dict(snapshot)
+
+    if graph_state:
+        graph_payload = {
+            key: value
+            for key, value in graph_state.items()
+            if key not in {'version', 'generatedAt', 'sourceFingerprint'}
+        }
+        enriched['graph'] = graph_payload
+
+    if change_tracker:
+        external_context = dict(enriched.get('externalContext', {}))
+        external_context['recentCommits'] = change_tracker.get('recentCommits', [])
+        external_context['recentChangedFiles'] = change_tracker.get('recentChangedFiles', [])
+        enriched['externalContext'] = external_context
+        enriched['changeTracker'] = {
+            key: value
+            for key, value in change_tracker.items()
+            if key != 'version'
+        }
+
+    return enriched
 
 
 def summarize_modules_from_records(file_records: list[dict]) -> dict[str, str]:
@@ -2165,10 +2368,15 @@ def build_read_next_hops(
         item['path']: item['dependsOn']
         for item in graph.get('fileDependencies', [])
     }
+    reverse_dependency_map = {
+        item['path']: item['usedBy']
+        for item in graph.get('reverseFileDependencies', [])
+    }
     module_file_map = {
         item.get('module'): [file_item.get('path') for file_item in item.get('files', []) if file_item.get('path')]
         for item in graph.get('pathIndex', [])
     }
+    recent_changed_files = snapshot.get('changeTracker', {}).get('recentChangedFiles', []) or snapshot.get('externalContext', {}).get('recentChangedFiles', [])
     next_hops = []
     seen = set(file_paths)
     matched_paths = [item.get('path') for item in snippet_items if item.get('path')]
@@ -2218,6 +2426,8 @@ def build_read_next_hops(
     for path in matched_paths[:6]:
         for dependency in dependency_map.get(path, [])[:4]:
             add_hop(dependency, 'matched file dependency')
+        for dependent in reverse_dependency_map.get(path, [])[:4]:
+            add_hop(dependent, 'matched file dependent')
 
     matched_modules = {path_module(path) for path in matched_paths + file_paths if path}
     for module_name in matched_modules:
@@ -2240,6 +2450,11 @@ def build_read_next_hops(
                 add_hop(item['path'], 'keyword-related important file')
                 if len(next_hops) >= 8:
                     break
+
+    for path in recent_changed_files[:8]:
+        add_hop(path, 'recently changed follow-up')
+        if len(next_hops) >= 8:
+            break
 
     if len(next_hops) < 8:
         hotspot_candidates = sorted(
@@ -2552,12 +2767,14 @@ def build_file_tree(files: list[str], project_path: str) -> dict[str, list[str]]
     }
 
 
-def generate_snapshot(project_path: str, force: bool = False) -> dict:
+def generate_snapshot(project_path: str, force: bool = False, incremental: bool = False) -> dict:
     """Generate complete project snapshot."""
     base = Path(project_path)
     output_dir = base / 'repo' / 'progress'
     output_file = output_dir / 'miloya-codebase.json'
     index_state_file = output_dir / 'miloya-codebase.index.json'
+    graph_state_file = output_dir / 'miloya-codebase.graph.json'
+    change_tracker_file = output_dir / 'miloya-codebase.changes.json'
 
     # Scan files
     files = scan_files(project_path)
@@ -2566,6 +2783,9 @@ def generate_snapshot(project_path: str, force: bool = False) -> dict:
     newest_source_mtime = get_newest_source_mtime(files)
     existing_snapshot = load_existing_snapshot(output_file)
     existing_index_state = load_existing_index_state(index_state_file)
+    existing_graph_state = load_json_state(graph_state_file)
+    existing_change_tracker = load_json_state(change_tracker_file)
+    delta = diff_index_state(existing_index_state, current_signatures)
 
     if (
         existing_snapshot
@@ -2577,6 +2797,17 @@ def generate_snapshot(project_path: str, force: bool = False) -> dict:
         freshness['stale'] = False
         freshness['reason'] = 'source fingerprint unchanged'
         freshness['newestSourceMtime'] = newest_source_mtime
+        graph = existing_graph_state or existing_snapshot.get('graph', {})
+        external_context = dict(existing_snapshot.get('externalContext', {}))
+        if existing_change_tracker:
+            external_context['recentCommits'] = existing_change_tracker.get('recentCommits', [])
+            external_context['recentChangedFiles'] = existing_change_tracker.get('recentChangedFiles', [])
+        existing_snapshot['externalContext'] = external_context
+        existing_snapshot['changeTracker'] = {
+            key: value
+            for key, value in (existing_change_tracker or {}).items()
+            if key != 'version'
+        } if existing_change_tracker else existing_snapshot.get('changeTracker')
         existing_snapshot['index'] = build_index_metadata(
             base,
             index_state_file,
@@ -2589,9 +2820,53 @@ def generate_snapshot(project_path: str, force: bool = False) -> dict:
             (existing_index_state or {}).get('chunks', []),
             existing_snapshot.get('importantFiles', []),
         )
+        existing_snapshot['graph'] = {
+            key: value
+            for key, value in graph.items()
+            if key not in {'version', 'generatedAt', 'sourceFingerprint'}
+        } if graph else existing_snapshot.get('graph', {})
+        if not existing_change_tracker:
+            tracker = build_change_tracker(
+                source_fingerprint,
+                delta,
+                external_context,
+                mode='reused',
+            )
+            save_change_tracker(change_tracker_file, tracker)
+            existing_snapshot = attach_progress_states(existing_snapshot, existing_graph_state, tracker)
         return existing_snapshot
 
-    file_records, total_lines = collect_file_records(files, project_path)
+    incremental_allowed = (
+        incremental
+        and not force
+        and existing_snapshot is not None
+        and existing_index_state is not None
+        and can_incrementally_rebuild(existing_index_state, current_signatures)
+    )
+    new_paths, changed_paths, removed_paths = collect_changed_paths(existing_index_state, current_signatures)
+    changed_or_new_paths = sorted(new_paths | changed_paths)
+    use_incremental = (
+        incremental_allowed
+        and 0 < len(changed_or_new_paths) <= MAX_INCREMENTAL_CHANGED_FILES
+    )
+
+    if use_incremental:
+        changed_abs_paths = [str(base / path) for path in changed_or_new_paths]
+        changed_records, _ = collect_file_records(changed_abs_paths, project_path)
+        file_records = rebuild_file_records_from_index_state(
+            existing_index_state,
+            current_signatures,
+            changed_records,
+            removed_paths,
+        )
+        total_lines = sum(record['lineCount'] for record in file_records)
+        chunks = merge_chunks_for_incremental(existing_index_state, changed_records, removed_paths)
+        freshness_reason = 'incremental update'
+    else:
+        file_records, total_lines = collect_file_records(files, project_path)
+        chunks = build_chunks(file_records)
+        freshness_reason = 'forced regeneration' if force else ('regenerated because sources changed' if existing_snapshot else 'initial generation')
+
     # Detect framework
     frameworks = detect_framework(files, project_path)
 
@@ -2607,7 +2882,6 @@ def generate_snapshot(project_path: str, force: bool = False) -> dict:
     important_files = build_important_files(file_records, entry_points, workspace)
     modules = summarize_modules_from_records(file_records)
     analysis = build_analysis_metadata(file_records)
-    chunks = build_chunks(file_records)
     chunk_catalog = build_chunk_catalog(chunks, important_files)
     index_metadata = build_index_metadata(
         base,
@@ -2642,6 +2916,12 @@ def generate_snapshot(project_path: str, force: bool = False) -> dict:
         important_files,
     )
     context_hints = build_context_hints(summary, workspace, important_files, modules)
+
+    file_records = hydrate_record_contents(
+        file_records,
+        project_path,
+        set(summary.get('importantPaths', [])) | {item['path'] for item in important_files[:MAX_REPRESENTATIVE_SNIPPETS]},
+    )
 
     # Extract API routes, data models, functions
     api_routes = []
@@ -2704,6 +2984,17 @@ def generate_snapshot(project_path: str, force: bool = False) -> dict:
     architecture = infer_architecture(files, project_path)
     graph = build_code_graph(file_records, unique_routes, unique_models, key_functions, workspace, Path(project_path))
     external_context = collect_external_context(project_path, file_records)
+    change_tracker = build_change_tracker(
+        source_fingerprint,
+        delta,
+        external_context,
+        mode='incremental' if use_incremental else 'full',
+    )
+    external_context = {
+        **external_context,
+        'recentCommits': change_tracker.get('recentCommits', []),
+        'recentChangedFiles': change_tracker.get('recentChangedFiles', []),
+    }
     retrieval, context_packs = build_retrieval_artifacts(chunks, important_files, graph, external_context)
 
     # Build snapshot
@@ -2714,7 +3005,7 @@ def generate_snapshot(project_path: str, force: bool = False) -> dict:
         'sourceFingerprint': source_fingerprint,
         'freshness': {
             'stale': False,
-            'reason': 'forced regeneration' if force else ('regenerated because sources changed' if existing_snapshot else 'initial generation'),
+            'reason': freshness_reason,
             'newestSourceMtime': newest_source_mtime,
             'snapshotPath': normalize_rel_path(str(output_file.relative_to(base))),
         },
@@ -2733,6 +3024,11 @@ def generate_snapshot(project_path: str, force: bool = False) -> dict:
         'retrieval': retrieval,
         'contextPacks': context_packs,
         'externalContext': external_context,
+        'changeTracker': {
+            key: value
+            for key, value in change_tracker.items()
+            if key != 'version'
+        },
         'representativeSnippets': build_representative_snippets(file_records, important_files),
         'apiRoutes': sorted(unique_routes, key=lambda item: (item['handler'], item['path'], item['method'])),
         'dataModels': sorted(unique_models, key=lambda item: (item['file'], item['type'], item['name'])),
@@ -2745,6 +3041,8 @@ def generate_snapshot(project_path: str, force: bool = False) -> dict:
     with open(output_file, 'w', encoding='utf-8') as f:
         json.dump(snapshot, f, indent=2, ensure_ascii=False)
     save_index_state(index_state_file, current_signatures, chunks, file_records, source_fingerprint)
+    save_graph_state(graph_state_file, graph, source_fingerprint)
+    save_change_tracker(change_tracker_file, change_tracker)
 
     print(f"Snapshot saved to: {output_file}", file=sys.stderr)
     return snapshot
@@ -2774,7 +3072,7 @@ def read_query_input(
 def main():
     if len(sys.argv) < 2:
         print(
-            "Usage: python generate.py <project_path> [read|--read|report|--report] [--force] "
+            "Usage: python generate.py <project_path> [read|--read|report|--report] [--force] [--incremental] "
             "[--task <task>] [--query <query> | --query-escaped <ascii_escaped_query> "
             "| --query-file <utf8_file> | --query-stdin]",
             file=sys.stderr,
@@ -2785,6 +3083,7 @@ def main():
     cli_args = sys.argv[2:]
     read_mode = '--read' in cli_args or (len(cli_args) > 0 and cli_args[0] == 'read')
     report_mode = '--report' in cli_args or (len(cli_args) > 0 and cli_args[0] == 'report')
+    incremental = '--incremental' in cli_args
     force = '--force' in cli_args or '--refresh' in cli_args or (len(cli_args) > 0 and cli_args[0] == 'refresh')
     task = 'understand-project'
     query = None
@@ -2826,7 +3125,13 @@ def main():
         base = Path(project_path)
         snapshot = load_existing_snapshot(base / 'repo' / 'progress' / 'miloya-codebase.json')
         if not snapshot or force:
-            snapshot = generate_snapshot(project_path, force)
+            snapshot = generate_snapshot(project_path, force, incremental=incremental)
+
+        snapshot = attach_progress_states(
+            snapshot,
+            load_json_state(base / 'repo' / 'progress' / 'miloya-codebase.graph.json'),
+            load_json_state(base / 'repo' / 'progress' / 'miloya-codebase.changes.json'),
+        )
 
         index_state = load_existing_index_state(base / 'repo' / 'progress' / 'miloya-codebase.index.json')
         write_json_stdout(build_report_payload(snapshot, index_state, task, query))
@@ -2842,11 +3147,16 @@ def main():
             )
             sys.exit(1)
 
+        snapshot = attach_progress_states(
+            snapshot,
+            load_json_state(base / 'repo' / 'progress' / 'miloya-codebase.graph.json'),
+            load_json_state(base / 'repo' / 'progress' / 'miloya-codebase.changes.json'),
+        )
         index_state = load_existing_index_state(base / 'repo' / 'progress' / 'miloya-codebase.index.json')
         write_json_stdout(build_read_payload(snapshot, index_state, task, query))
         return
 
-    snapshot = generate_snapshot(project_path, force)
+    snapshot = generate_snapshot(project_path, force, incremental=incremental)
 
     if query:
         index_state = load_existing_index_state(Path(project_path) / 'repo' / 'progress' / 'miloya-codebase.index.json')
