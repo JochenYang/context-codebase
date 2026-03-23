@@ -8,10 +8,50 @@ description: Project context engine for repo orientation, cached handoff, and ta
 Project context engine for fast repo orientation, cached handoff, and
 task-focused code retrieval.
 
+## Prerequisites
+
+Before using this skill:
+
+- Run it against a single target project root, not a home directory or a mixed
+  parent folder that contains multiple unrelated projects.
+- `{project}` always means the current target project root where
+  `scripts/generate.py` is executed. It does not mean the skill directory.
+- First-time use should start with `/miloya-codebase` so the snapshot can be
+  created or reused.
+- `/miloya-codebase read` depends on an existing snapshot and index.
+- `/miloya-codebase report` prefers an existing snapshot, but can generate one
+  first when it is missing.
+
 Artifacts:
 
 - Snapshot: `{project}/repo/progress/miloya-codebase.json`
 - Index state: `{project}/repo/progress/miloya-codebase.index.json`
+
+These files are stored inside the target project, under `repo/progress/`.
+
+## Fit
+
+Good fit:
+
+- a single repository or a clearly defined project workspace
+- small to medium codebases, or larger repositories that still behave like one
+  project root
+- onboarding, model handoff, fast repo understanding, and focused code lookup
+
+Avoid or narrow scope first:
+
+- home directories or downloads folders
+- parent directories that contain multiple unrelated repositories
+- huge mixed workspaces or monorepos where the opened folder is not the actual
+  project root
+- generated/vendor-heavy directories without a clear source root
+
+## Quick Start
+
+1. Open or enter the target project root.
+2. Run `/miloya-codebase` once to generate or reuse the snapshot.
+3. Use `/miloya-codebase read <question>` for fast file and snippet retrieval.
+4. Use `/miloya-codebase report <question>` when you need a deeper analysis pack.
 
 ## When To Use
 
@@ -77,6 +117,7 @@ Use it when:
 - the snapshot already exists
 - you want fast file and snippet retrieval for a specific question
 - you want to preserve tokens and avoid rescanning
+- if no snapshot exists yet, run `/miloya-codebase` first
 
 Host requirements:
 
@@ -125,6 +166,8 @@ Use it when:
 - you want a full technical report
 - you want a complete call chain or architecture trace
 - you want to preserve the parent thread token budget
+- if the snapshot is missing, this mode may generate it first before building
+  the pack
 
 Host requirements:
 

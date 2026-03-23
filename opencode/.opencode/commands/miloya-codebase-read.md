@@ -8,7 +8,13 @@ Question: $ARGUMENTS
 
 Requirements:
 
+- Treat the current workspace root as the project path.
+- Do not guess another repository path, parent directory, home directory, or
+  skill installation path.
+- If the current workspace is not a single project root, stop and say so.
 - Treat read mode as consuming the existing snapshot and index.
+- If the snapshot is missing, do not pretend read mode can use cached context;
+  run the default `/miloya-codebase` flow first.
 - Do not imply a full repo rescan.
 - Start from `files`, `snippets`, `flowAnchors`, `nextHops`, and `searchScope`.
 - Only widen to repo search if the payload is insufficient.

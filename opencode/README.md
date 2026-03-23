@@ -33,6 +33,15 @@ opencode/
 3. 如果你已经全局安装了 `miloya-codebase`，可以删除本地占位目录
    `.opencode/skills/miloya-codebase/`，只保留命令文件即可。
 
+这里有一个关键约定：
+
+- **当前打开的 workspace 根目录，就是 `{project}`。**
+- 宿主应把当前 workspace root / cwd 当作 `generate.py` 的目标项目路径。
+- 不要让模型自己猜项目路径，也不要默认退回到 home、上级目录或 skill
+  安装目录。
+- 如果当前打开的目录不是一个明确的项目根目录，应先提示用户切换到正确
+  项目，再使用 `miloya-codebase`。
+
 ## 可用命令
 
 - `/miloya-codebase`

@@ -8,6 +8,10 @@ Question: $ARGUMENTS
 
 Requirements:
 
+- Treat the current workspace root as the project path.
+- Do not guess another repository path, parent directory, home directory, or
+  skill installation path.
+- If the current workspace is not a single project root, stop and say so.
 - Treat report mode as consuming the existing snapshot and index.
 - Generate a deep-pack style result for deeper analysis.
 - Do not expand into a full long report unless delegation is unavailable.
