@@ -1136,5 +1136,27 @@ class GenerateSnapshotTests(unittest.TestCase):
         self.assertEqual(value, "技能下载流程")
 
 
+class GenerateCliModeTests(unittest.TestCase):
+    def test_refresh_cli_maps_to_incremental_without_force(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="miloya-codebase-cli-") as temp_dir:
+            with patch.object(GENERATE.sys, "argv", ["generate.py", temp_dir, "refresh"]):
+                with patch.object(GENERATE, "generate_snapshot", return_value={"ok": True}) as generate_snapshot:
+                    with patch.object(GENERATE, "write_json_stdout") as write_json_stdout:
+                        GENERATE.main()
+
+        generate_snapshot.assert_called_once_with(temp_dir, False, incremental=True)
+        write_json_stdout.assert_called_once_with({"ok": True})
+
+    def test_force_flag_keeps_full_rebuild_semantics(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="miloya-codebase-cli-") as temp_dir:
+            with patch.object(GENERATE.sys, "argv", ["generate.py", temp_dir, "--force"]):
+                with patch.object(GENERATE, "generate_snapshot", return_value={"ok": True}) as generate_snapshot:
+                    with patch.object(GENERATE, "write_json_stdout") as write_json_stdout:
+                        GENERATE.main()
+
+        generate_snapshot.assert_called_once_with(temp_dir, True, incremental=False)
+        write_json_stdout.assert_called_once_with({"ok": True})
+
+
 if __name__ == "__main__":
     unittest.main()

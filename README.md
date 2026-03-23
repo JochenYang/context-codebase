@@ -46,7 +46,8 @@ Use the mode that matches the question you need answered:
 - `/miloya-codebase`: build or reuse a snapshot for high-level orientation
 - `python ... generate.py <project_path> --incremental`: perform a safe
   lightweight update when prior index data exists
-- `/miloya-codebase refresh`: force a fresh scan after meaningful repo changes
+- `/miloya-codebase refresh`: refresh the snapshot incrementally when possible
+- `python ... generate.py <project_path> --force`: force a full rebuild
 - `/miloya-codebase read`: answer a focused implementation question quickly
 - `/miloya-codebase report`: prepare a deeper host-side technical walkthrough
 
@@ -60,7 +61,6 @@ Behavior:
 
 - generates a snapshot when none exists
 - reuses the cached snapshot when the source fingerprint is unchanged
-- supports safe `--incremental` rebuilds when the previous index is compatible
 - returns a repo overview optimized for fast understanding
 
 Use it when:
@@ -71,19 +71,20 @@ Use it when:
 
 ### `/miloya-codebase refresh`
 
-Force-refresh mode.
+Refresh mode.
 
 Behavior:
 
-- ignores cache reuse
-- rescans the repository
-- overwrites the existing snapshot
+- refreshes the existing snapshot incrementally when prior index data is
+  compatible
+- falls back to a full rebuild when the delta is unsafe or incomplete
+- overwrites the existing snapshot artifacts with the refreshed state
 
 Use it when:
 
-- the codebase changed significantly
-- the current snapshot is stale
-- you explicitly want a fresh scan
+- the codebase changed and you want the snapshot updated before more focused
+  queries
+- you want new or modified files reflected in `read` and `report`
 
 ### `/miloya-codebase read`
 
@@ -173,7 +174,7 @@ The snapshot and index expose several layers of context:
 embedding-backed semantic search stack:
 
 - snapshot and index reuse
-- safe incremental rebuilds
+- safe incremental refreshes
 - chunk-based keyword retrieval
 - graph-aware expansion
 - important-file boosting

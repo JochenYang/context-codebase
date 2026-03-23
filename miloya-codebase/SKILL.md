@@ -74,8 +74,8 @@ Behavior:
 
 - Generate a new snapshot when none exists
 - Reuse the cached snapshot when the source fingerprint is unchanged
-- Support `--incremental` for safe lightweight updates when prior index data is available
 - Return a project overview optimized for fast model understanding
+- Use `--force` only when you explicitly want a full rebuild
 
 Use it when:
 
@@ -85,18 +85,19 @@ Use it when:
 
 ### `/miloya-codebase refresh`
 
-Force regenerate the snapshot.
+Refresh the snapshot.
 
 Behavior:
 
-- Ignore cache reuse
-- Re-scan the project and overwrite the existing snapshot
+- Refresh the existing snapshot incrementally when prior index data is compatible
+- Fall back to a full rebuild when the delta is unsafe or incomplete
+- Overwrite the existing snapshot artifacts with the refreshed state
 
 Use it when:
 
-- the codebase changed significantly
-- you suspect the snapshot is stale
-- you explicitly do not want cache reuse
+- the codebase changed and you want the snapshot refreshed before asking more
+  focused questions
+- you want newly added or modified files reflected in `read` and `report`
 
 ### `/miloya-codebase read`
 
@@ -201,7 +202,8 @@ source code is scanned or cached artifacts are consumed:
 - default mode: may generate a snapshot or reuse a cached one
 - `--incremental`: rebuild safely from the current project state using prior
   index data when possible, and fall back to a full rebuild when not safe
-- `refresh`: always rescans and overwrites the cached snapshot
+- `refresh`: requests an incremental snapshot refresh first, and falls back to
+  a full rebuild when incremental refresh is not safe
 - `read`: consumes the existing snapshot and index to build a retrieval payload
 - `report`: consumes the existing snapshot and index to build a `deep-pack`
 

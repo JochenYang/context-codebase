@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 miloya-codebase: Generate project snapshot JSON
-Usage: python generate.py <project_path> [--force]
+Usage: python generate.py <project_path> [--force|--incremental|refresh]
 """
 
 import hashlib
@@ -3072,7 +3072,7 @@ def read_query_input(
 def main():
     if len(sys.argv) < 2:
         print(
-            "Usage: python generate.py <project_path> [read|--read|report|--report] [--force] [--incremental] "
+            "Usage: python generate.py <project_path> [read|--read|report|--report|refresh] [--force] [--incremental] "
             "[--task <task>] [--query <query> | --query-escaped <ascii_escaped_query> "
             "| --query-file <utf8_file> | --query-stdin]",
             file=sys.stderr,
@@ -3081,10 +3081,11 @@ def main():
 
     project_path = sys.argv[1]
     cli_args = sys.argv[2:]
+    refresh_mode = '--refresh' in cli_args or (len(cli_args) > 0 and cli_args[0] == 'refresh')
     read_mode = '--read' in cli_args or (len(cli_args) > 0 and cli_args[0] == 'read')
     report_mode = '--report' in cli_args or (len(cli_args) > 0 and cli_args[0] == 'report')
-    incremental = '--incremental' in cli_args
-    force = '--force' in cli_args or '--refresh' in cli_args or (len(cli_args) > 0 and cli_args[0] == 'refresh')
+    incremental = '--incremental' in cli_args or refresh_mode
+    force = '--force' in cli_args
     task = 'understand-project'
     query = None
     escaped_query = None
