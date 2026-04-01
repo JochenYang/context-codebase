@@ -1,6 +1,6 @@
 # context-codebase/scripts/context_engine/sqlite_index.py
 """
-SQLite 索引 - 高速 KV 查询存储
+SQLite index - high-speed KV query storage
 """
 from __future__ import annotations
 import json
@@ -10,14 +10,14 @@ from typing import Optional
 
 
 class SQLiteIndex:
-    """基于 SQLite 的 chunk 索引"""
+    """SQLite-based chunk index"""
 
     def __init__(self, db_path: str):
         self.db_path = db_path
         self._init_db()
 
     def _init_db(self):
-        """初始化数据库 schema"""
+        """Initialize database schema"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
 
@@ -44,7 +44,7 @@ class SQLiteIndex:
         conn.close()
 
     def upsert_chunks(self, chunks: list[dict]) -> None:
-        """批量插入或更新 chunks"""
+        """Batch insert or update chunks"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
 
@@ -71,12 +71,12 @@ class SQLiteIndex:
         conn.close()
 
     def search(self, query: str, limit: int = 10) -> list[dict]:
-        """搜索 chunks"""
+        """Search chunks"""
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
 
-        # 简单关键词匹配
+        # Simple keyword matching
         like_pattern = f"%{query}%"
 
         cursor.execute("""
@@ -103,7 +103,7 @@ class SQLiteIndex:
         return results
 
     def get_by_path(self, path: str) -> list[dict]:
-        """获取指定路径的所有 chunks"""
+        """Get all chunks for a specific path"""
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
@@ -128,21 +128,21 @@ class SQLiteIndex:
         return results
 
     def delete_stale(self, valid_ids: set[str]) -> None:
-        """删除不在 valid_ids 中的 chunks"""
+        """Delete chunks not in valid_ids"""
         if not valid_ids:
             return
 
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
 
-        # 安全检查：如果 valid_ids 中的 ID 在数据库中都不存在，跳过删除
-        # 这防止误删整个数据库（例如 valid_ids 已过期的情况）
+        # Safety check: skip deletion if none of valid_ids exist in DB
+        # Prevents accidental full DB wipe (e.g., when valid_ids is stale)
         placeholders = ','.join('?' * len(valid_ids))
         cursor.execute(f"SELECT COUNT(*) FROM chunks WHERE id IN ({placeholders})", tuple(valid_ids))
         count = cursor.fetchone()[0]
 
         if count == 0:
-            # valid_ids 中的 ID 在数据库中都不存在，跳过删除
+            # None of valid_ids exist in DB, skip deletion
             conn.close()
             return
 
@@ -152,5 +152,5 @@ class SQLiteIndex:
         conn.close()
 
     def close(self):
-        """关闭连接"""
+        """Close connection"""
         pass

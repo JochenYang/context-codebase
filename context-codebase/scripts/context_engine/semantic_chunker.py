@@ -1,6 +1,6 @@
 # context-codebase/scripts/context_engine/semantic_chunker.py
 """
-语义分块器 - 基于 AST 边界的智能分块
+Semantic chunker - AST-based intelligent chunking
 """
 from __future__ import annotations
 import ast
@@ -12,35 +12,35 @@ SMALL_FILE_LINES = 60
 MEDIUM_FILE_LINES = 150
 
 class SemanticChunker:
-    """基于 AST 的语义感知分块器"""
+    """AST-based semantic chunker"""
 
     def chunk_file(self, content: str, filepath: str, language: str) -> list[dict]:
-        """对文件进行语义分块"""
-        # 统一路径格式，避免 Windows 反斜杠导致 ID 格式错误
+        """Chunk a file using semantic boundaries"""
+        # Normalize path format, avoid Windows backslash causing ID format errors
         filepath = filepath.replace('\\', '/')
         lines = content.splitlines()
         total_lines = len(lines)
 
-        # 小文件保持原样（<60 行整块，>=60 行按 AST 边界分块）
+        # Small files stay intact (<60 lines), >=60 lines split by AST boundaries
         if total_lines < SMALL_FILE_LINES:
             return [self._create_chunk(filepath, 1, total_lines, "section", "", content, language)]
 
-        # 解析 AST
+        # Parse AST
         try:
             tree = ast.parse(content)
         except SyntaxError:
-            # 解析失败时按固定行数分
+            # Parse failed, fallback to fixed-line chunking
             return self._chunk_by_lines(content, filepath, language)
 
-        # 根据文件大小选择分块策略
+        # Choose chunking strategy based on file size
         return self._chunk_by_ast_boundaries(tree, content, filepath, language)
 
     def _chunk_by_ast_boundaries(self, tree: ast.AST, content: str, filepath: str, language: str) -> list[dict]:
-        """基于 AST 边界分块（仅顶层节点）"""
+        """Split by AST boundaries, only top-level nodes"""
         chunks = []
         lines = content.splitlines()
 
-        # 只处理顶层节点（Module 的直接子节点）
+        # Only process top-level nodes (direct children of Module)
         for node in tree.body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 if hasattr(node, 'lineno') and hasattr(node, 'end_lineno'):
@@ -68,14 +68,14 @@ class SemanticChunker:
                             "language": language
                         })
 
-        # 如果没有 AST 节点，按行分
+        # No AST nodes, split by lines
         if not chunks:
             return self._chunk_by_lines(content, filepath, language)
 
         return chunks
 
     def _chunk_by_lines(self, content: str, filepath: str, language: str) -> list[dict]:
-        """按固定行数分块（fallback）"""
+        """Split by fixed line count (fallback)"""
         chunks = []
         lines = content.splitlines()
         total = len(lines)
@@ -102,21 +102,21 @@ class SemanticChunker:
         return chunks
 
     def _extract_signals(self, content: str, name: str, language: str) -> list[str]:
-        """提取语义信号"""
+        """Extract semantic signals from content"""
         import re
         signals = set()
 
-        # 从名称提取
+        # Extract from name
         if name:
             signals.update(re.findall(r'[a-z]+', name.lower()))
 
-        # 从注释/docstring 提取
+        # Extract from comments/docstrings
         docstrings = re.findall(r'"""(.*?)"""', content, re.DOTALL)
         docstrings += re.findall(r"'''(.*?)'''", content, re.DOTALL)
         for doc in docstrings:
             signals.update(re.findall(r'[a-z]+', doc.lower()))
 
-        # 从代码关键词提取
+        # Extract from code keywords
         keywords = [
             'auth', 'login', 'password', 'token', 'jwt', 'session',
             'api', 'http', 'request', 'response', 'endpoint',
@@ -139,7 +139,7 @@ class SemanticChunker:
         return sorted(list(signals))[:20]
 
     def _create_chunk(self, filepath: str, start: int, end: int, kind: str, name: str, content: str, language: str) -> dict:
-        """创建单个 chunk"""
+        """Create a single chunk"""
         return {
             "id": f"{filepath}:{start}-{end}",
             "path": filepath,

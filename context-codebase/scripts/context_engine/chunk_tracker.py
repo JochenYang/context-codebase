@@ -1,5 +1,5 @@
 """
-Chunk 级增量追踪器
+Chunk-level incremental tracker
 """
 from __future__ import annotations
 import hashlib
@@ -20,11 +20,11 @@ class ChangeSet:
     unchanged: list[str] = field(default_factory=list)
 
 class ChunkTracker:
-    """Chunk 级增量追踪器"""
+    """Chunk-level incremental tracker"""
 
     def track(self, chunks: list[dict]) -> dict[str, ChunkState]:
         """
-        为每个 chunk 生成稳定的状态记录
+        Generate stable state records for each chunk
         """
         states = {}
 
@@ -43,22 +43,22 @@ class ChunkTracker:
 
     def diff(self, old: dict[str, ChunkState], new: dict[str, ChunkState]) -> ChangeSet:
         """
-        比对两个状态集，返回变更集
+        Compare two state sets and return a change set
         """
         change_set = ChangeSet()
 
         old_ids = set(old.keys())
         new_ids = set(new.keys())
 
-        # 新增
+        # Added
         for chunk_id in new_ids - old_ids:
             change_set.added.append({"id": chunk_id})
 
-        # 删除
+        # Deleted
         for chunk_id in old_ids - new_ids:
             change_set.deleted.append(chunk_id)
 
-        # 修改和未变更
+        # Modified and unchanged
         for chunk_id in old_ids & new_ids:
             if old[chunk_id].content_hash != new[chunk_id].content_hash:
                 change_set.modified.append({"id": chunk_id})
@@ -69,13 +69,13 @@ class ChunkTracker:
 
     def merge_states(self, old: dict[str, ChunkState], new: dict[str, ChunkState]) -> dict[str, ChunkState]:
         """
-        合并新旧状态，版本号递增
+        Merge old and new states, incrementing version numbers
         """
         merged = dict(old)
 
         for chunk_id, state in new.items():
             if chunk_id in old:
-                # 版本递增
+                # Increment version
                 merged[chunk_id] = ChunkState(
                     chunk_id=chunk_id,
                     content_hash=state.content_hash,
@@ -87,5 +87,5 @@ class ChunkTracker:
         return merged
 
     def _hash_content(self, content: str) -> str:
-        """计算内容的 hash"""
+        """Compute content hash"""
         return hashlib.sha256(content.encode()).hexdigest()[:16]

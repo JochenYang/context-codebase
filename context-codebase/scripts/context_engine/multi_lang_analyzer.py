@@ -1,5 +1,5 @@
 """
-多语言分析器 - 全语言支持
+Multi-language analyzer - supports all major languages
 """
 from __future__ import annotations
 import ast
@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Optional
 
 class MultiLangAnalyzer:
-    """支持多语言的分析器"""
+    """Multi-language analyzer"""
 
     EXT_TO_LANGUAGE = {
         ".py": "python",
@@ -31,11 +31,11 @@ class MultiLangAnalyzer:
     }
 
     def supports(self, ext: str) -> bool:
-        """是否支持该扩展名"""
+        """Check if this extension is supported"""
         return ext.lower() in self.EXT_TO_LANGUAGE
 
     def analyze(self, content: str, filepath: str) -> dict:
-        """分析文件内容"""
+        """Analyze file content"""
         ext = Path(filepath).suffix.lower()
         language = self.EXT_TO_LANGUAGE.get(ext, "unknown")
 
@@ -51,7 +51,7 @@ class MultiLangAnalyzer:
             return self._fallback_analysis(content, filepath, language)
 
     def _analyze_python(self, content: str, filepath: str) -> dict:
-        """分析 Python 文件"""
+        """Analyze Python file"""
         result = self._base_analysis(content, filepath)
         result["language"] = "python"
 
@@ -76,7 +76,7 @@ class MultiLangAnalyzer:
         return result
 
     def _analyze_go(self, content: str, filepath: str) -> dict:
-        """分析 Go 文件"""
+        """Analyze Go file"""
         result = self._base_analysis(content, filepath)
         result["language"] = "go"
 
@@ -103,7 +103,7 @@ class MultiLangAnalyzer:
         return result
 
     def _analyze_rust(self, content: str, filepath: str) -> dict:
-        """分析 Rust 文件"""
+        """Analyze Rust file"""
         result = self._base_analysis(content, filepath)
         result["language"] = "rust"
 
@@ -124,7 +124,7 @@ class MultiLangAnalyzer:
         return result
 
     def _analyze_js(self, content: str, filepath: str) -> dict:
-        """分析 JavaScript/TypeScript 文件"""
+        """Analyze JavaScript/TypeScript file"""
         result = self._base_analysis(content, filepath)
         ext = Path(filepath).suffix.lower()
         result["language"] = "typescript" if ext in (".ts", ".tsx") else "javascript"
@@ -132,7 +132,7 @@ class MultiLangAnalyzer:
         # import xxx from 'yyy'
         for match in re.finditer(r"import\s+(?:{\s*)?(\w+)(?:\s*,)?\s*.*?\s+from\s+['\"]([^'\"]+)['\"]", content):
             imp_path = match.group(2)
-            # 相对路径保留完整路径
+            # Keep full path for relative imports
             if imp_path.startswith('.'):
                 result["imports"].append(imp_path)
             else:
@@ -156,13 +156,13 @@ class MultiLangAnalyzer:
         return result
 
     def _fallback_analysis(self, content: str, filepath: str, language: str) -> dict:
-        """通用 fallback 分析"""
+        """Generic fallback analyzer"""
         result = self._base_analysis(content, filepath)
         result["language"] = language
         return result
 
     def _base_analysis(self, content: str, filepath: str) -> dict:
-        """基础分析结构"""
+        """Base analysis structure"""
         return {
             "path": filepath,
             "imports": [],
