@@ -1,6 +1,6 @@
 # Deep Pack Contract
 
-Use this reference when the host runs `/miloya-codebase report`.
+Use this reference when the host runs `/context-codebase report`.
 
 `report` should return a `deep-pack` rather than a finished essay. The pack is
 the stable boundary between the context engine and the host.

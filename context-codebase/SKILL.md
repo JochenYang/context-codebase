@@ -1,59 +1,17 @@
 ---
-name: miloya-codebase
-description: Project context engine for repo orientation, cached handoff, and task-focused code retrieval. Usage: /miloya-codebase [refresh|read|report]
+name: context-codebase
+description: "Project context engine for repo orientation, cached handoff, and task-focused code retrieval."
 ---
 
-# miloya-codebase
+# context-codebase
 
 Project context engine for fast repo orientation, cached handoff, and
 task-focused code retrieval.
 
-## Prerequisites
-
-Before using this skill:
-
-- Run it against a single target project root, not a home directory or a mixed
-  parent folder that contains multiple unrelated projects.
-- `{project}` always means the current target project root where
-  `scripts/generate.py` is executed. It does not mean the skill directory.
-- First-time use should start with `/miloya-codebase` so the snapshot can be
-  created or reused.
-- `/miloya-codebase read` depends on an existing snapshot and index.
-- `/miloya-codebase report` prefers an existing snapshot, but can generate one
-  first when it is missing.
-
 Artifacts:
 
-- Snapshot: `{project}/repo/progress/miloya-codebase.json`
-- Index state: `{project}/repo/progress/miloya-codebase.index.json`
-- Graph state: `{project}/repo/progress/miloya-codebase.graph.json`
-- Change tracker: `{project}/repo/progress/miloya-codebase.changes.json`
-
-These files are stored inside the target project, under `repo/progress/`.
-
-## Fit
-
-Good fit:
-
-- a single repository or a clearly defined project workspace
-- small to medium codebases, or larger repositories that still behave like one
-  project root
-- onboarding, model handoff, fast repo understanding, and focused code lookup
-
-Avoid or narrow scope first:
-
-- home directories or downloads folders
-- parent directories that contain multiple unrelated repositories
-- huge mixed workspaces or monorepos where the opened folder is not the actual
-  project root
-- generated/vendor-heavy directories without a clear source root
-
-## Quick Start
-
-1. Open or enter the target project root.
-2. Run `/miloya-codebase` once to generate or reuse the snapshot.
-3. Use `/miloya-codebase read <question>` for fast file and snippet retrieval.
-4. Use `/miloya-codebase report <question>` when you need a deeper analysis pack.
+- Snapshot: `{project}/repo/progress/context-codebase.json`
+- Index state: `{project}/repo/progress/context-codebase.index.json`
 
 ## When To Use
 
@@ -66,7 +24,7 @@ Use this skill when you need to:
 
 ## Modes
 
-### `/miloya-codebase`
+### `/context-codebase`
 
 Default entry.
 
@@ -75,7 +33,6 @@ Behavior:
 - Generate a new snapshot when none exists
 - Reuse the cached snapshot when the source fingerprint is unchanged
 - Return a project overview optimized for fast model understanding
-- Use `--force` only when you explicitly want a full rebuild
 
 Use it when:
 
@@ -83,23 +40,26 @@ Use it when:
 - switching to a new model or IDE
 - you want a general repo overview
 
-### `/miloya-codebase refresh`
+### `/context-codebase refresh`
 
-Refresh the snapshot.
+Incrementally update the index and cache metadata.
 
 Behavior:
 
-- Refresh the existing snapshot incrementally when prior index data is compatible
-- Fall back to a full rebuild when the delta is unsafe or incomplete
-- Overwrite the existing snapshot artifacts with the refreshed state
+- Recompute the source fingerprint and compare it with the cached artifacts
+- Reuse the cached artifacts when nothing changed
+- Update the index incrementally when sources changed
+- Keep the existing snapshot structure and only refresh metadata needed by the
+  cache contract
+- Can be combined with `read` / `report` to refresh before answering
 
 Use it when:
 
-- the codebase changed and you want the snapshot refreshed before asking more
-  focused questions
-- you want newly added or modified files reflected in `read` and `report`
+- the repo changed and you want the cache to catch up
+- you want fresh context without forcing unnecessary rebuild work
+- you want `read` / `report` to consume the freshest snapshot first
 
-### `/miloya-codebase read`
+### `/context-codebase read`
 
 Focused retrieval mode.
 
@@ -115,15 +75,12 @@ Behavior:
   - `searchScope`
   - `hotspots`
   - `externalContext`
-- Use graph and recent-change state when available to improve `nextHops` and
-  candidate context quality
 
 Use it when:
 
 - the snapshot already exists
 - you want fast file and snippet retrieval for a specific question
 - you want to preserve tokens and avoid rescanning
-- if no snapshot exists yet, run `/miloya-codebase` first
 
 Host requirements:
 
@@ -156,7 +113,7 @@ Read answer contract:
 - Stop once the next model can continue reading code efficiently
 - Leave exhaustive tracing, edge cases, and broader architecture to `report`
 
-### `/miloya-codebase report`
+### `/context-codebase report`
 
 Deep-analysis mode.
 
@@ -172,8 +129,6 @@ Use it when:
 - you want a full technical report
 - you want a complete call chain or architecture trace
 - you want to preserve the parent thread token budget
-- if the snapshot is missing, this mode may generate it first before building
-  the pack
 
 Host requirements:
 
@@ -200,10 +155,8 @@ The entrypoint is always `scripts/generate.py`, but the mode determines whether
 source code is scanned or cached artifacts are consumed:
 
 - default mode: may generate a snapshot or reuse a cached one
-- `--incremental`: rebuild safely from the current project state using prior
-  index data when possible, and fall back to a full rebuild when not safe
-- `refresh`: requests an incremental snapshot refresh first, and falls back to
-  a full rebuild when incremental refresh is not safe
+- `refresh`: incrementally updates the index when sources changed and keeps the
+  existing snapshot structure
 - `read`: consumes the existing snapshot and index to build a retrieval payload
 - `report`: consumes the existing snapshot and index to build a `deep-pack`
 
@@ -211,6 +164,7 @@ Important clarifications:
 
 - Seeing `python ... generate.py ... --read` or `--report` does not mean the
   repo is being rescanned
+- Seeing `refresh` means "incrementally update the index if needed", not "force rebuild"
 - `freshness.reason` inside a `read` or `report` payload describes how the
   current snapshot was produced previously; it does not mean the current
   invocation regenerated the snapshot
@@ -248,13 +202,13 @@ On Windows or any environment where non-ASCII query text may become mojibake:
 ## Manual Script Usage
 
 Replace `{skill_dir}` with the actual installed skill path. In this repository,
-that path is `miloya-codebase/`.
+that path is `context-codebase/`.
 
 ```bash
 python {skill_dir}/scripts/generate.py <project_path>
-python {skill_dir}/scripts/generate.py <project_path> --incremental
-python {skill_dir}/scripts/generate.py <project_path> --force
+python {skill_dir}/scripts/generate.py <project_path> refresh
 python {skill_dir}/scripts/generate.py <project_path> --read
+python {skill_dir}/scripts/generate.py <project_path> --read --refresh
 python {skill_dir}/scripts/generate.py <project_path> --read --task feature-delivery --query "skill lifecycle runtime"
 python {skill_dir}/scripts/generate.py <project_path> --read --task feature-delivery --query-escaped "\\u6280\\u80fd\\u7ba1\\u7406\\u5668\\u5982\\u4f55\\u5b9e\\u73b0"
 python {skill_dir}/scripts/generate.py <project_path> --read --task feature-delivery --query-file query.txt

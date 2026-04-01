@@ -20,23 +20,14 @@ def build_code_graph(
     path_to_record = {record['path']: record for record in file_records}
     resolution_config = load_resolution_config(project_root)
     file_dependencies = {}
-    reverse_file_dependencies = defaultdict(list)
     dependency_edges = []
     module_edge_counts = Counter()
     symbol_index = []
-    file_details = []
 
     for record in file_records:
         resolved_dependencies = resolve_local_dependencies(record, file_paths, resolution_config)
         file_dependencies[record['path']] = resolved_dependencies
         source_module = module_for_path(record['path'])
-        file_details.append({
-            'path': record['path'],
-            'module': source_module,
-            'imports': record.get('imports', [])[:20],
-            'exports': record.get('exports', [])[:20],
-            'language': record.get('language'),
-        })
 
         for target_path in resolved_dependencies:
             dependency_edges.append({
@@ -44,7 +35,6 @@ def build_code_graph(
                 'target': target_path,
                 'type': 'imports',
             })
-            reverse_file_dependencies[target_path].append(record['path'])
             target_module = module_for_path(target_path)
             if source_module != target_module:
                 module_edge_counts[(source_module, target_module)] += 1
@@ -134,12 +124,6 @@ def build_code_graph(
             for path, targets in sorted(file_dependencies.items())
             if targets
         ][:120],
-        'reverseFileDependencies': [
-            {'path': path, 'usedBy': sorted(dict.fromkeys(sources))[:20]}
-            for path, sources in sorted(reverse_file_dependencies.items())
-            if sources
-        ][:120],
-        'fileDetails': sorted(file_details, key=lambda item: item['path'])[:240],
         'routeToHandler': route_to_handler[:120],
         'symbolIndex': sorted(symbol_index, key=lambda item: (item['file'], item.get('line') or 0, item['kind'], item['name']))[:240],
         'hotspots': hotspots[:30],

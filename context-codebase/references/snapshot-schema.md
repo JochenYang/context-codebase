@@ -12,8 +12,8 @@ Positioning reminder:
 
 ## Snapshot Path
 
-- Snapshot: `{project}/repo/progress/miloya-codebase.json`
-- Index state: `{project}/repo/progress/miloya-codebase.index.json`
+- Snapshot: `{project}/repo/progress/context-codebase.json`
+- Index state: `{project}/repo/progress/context-codebase.index.json`
 
 ## Representative Snapshot Shape
 
@@ -27,7 +27,7 @@ Positioning reminder:
     "stale": false,
     "reason": "source fingerprint unchanged",
     "newestSourceMtime": "2026-03-18T...",
-    "snapshotPath": "repo/progress/miloya-codebase.json"
+  "snapshotPath": "repo/progress/context-codebase.json"
   },
   "git": {
     "branch": "main",
@@ -63,7 +63,7 @@ Positioning reminder:
   },
   "index": {
     "stateVersion": "1.0",
-    "statePath": "repo/progress/miloya-codebase.index.json",
+    "statePath": "repo/progress/context-codebase.index.json",
     "fileCount": 234,
     "chunkCount": 980,
     "reusedSnapshot": false

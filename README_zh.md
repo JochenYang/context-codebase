@@ -1,4 +1,4 @@
-# miloya-codebase
+# context-codebase
 
 <p align="center">
   <strong>语言</strong><br/>
@@ -6,7 +6,7 @@
   <a href="./README_zh.md">简体中文</a>
 </p>
 
-`miloya-codebase` 是一个用于仓库快速理解、缓存式上下文交接和任务定向检索的
+`context-codebase` 是一个用于仓库快速理解、缓存式上下文交接和任务定向检索的
 Context Engine。
 
 它会在项目内的 `repo/progress/` 下生成可复用产物，让新的模型、新的 IDE 会话
@@ -17,7 +17,7 @@ Context Engine。
 很多仓库分析工具只停留在文件树、语言统计或符号列表层面，这对真实协作中的模
 型交接并不够。
 
-`miloya-codebase` 关注的是更实际的问题：
+`context-codebase` 关注的是更实际的问题：
 
 - 这是什么类型的项目？
 - 应该先读哪些文件？
@@ -29,10 +29,8 @@ Context Engine。
 
 skill 会生成并复用以下文件：
 
-- `repo/progress/miloya-codebase.json`
-- `repo/progress/miloya-codebase.index.json`
-- `repo/progress/miloya-codebase.graph.json`
-- `repo/progress/miloya-codebase.changes.json`
+- `repo/progress/context-codebase.json`
+- `repo/progress/context-codebase.index.json`
 
 这些产物首先是给模型消费的，不只是给人类查看。
 
@@ -40,16 +38,14 @@ skill 会生成并复用以下文件：
 
 按问题类型选择模式即可：
 
-- `/miloya-codebase`：生成或复用快照，用于建立整体认知
-- `python ... generate.py <项目路径> --incremental`：在已有索引可用时做安全的轻量更新
-- `/miloya-codebase refresh`：在可能时对现有快照做增量刷新
-- `python ... generate.py <项目路径> --force`：强制做一次全量重建
-- `/miloya-codebase read`：快速回答具体实现问题
-- `/miloya-codebase report`：为宿主侧生成更深入的技术分析输入
+- `/context-codebase`：生成或复用快照，用于建立整体认知
+- `/context-codebase refresh`：在仓库明显变化后强制重扫
+- `/context-codebase read`：快速回答具体实现问题
+- `/context-codebase report`：为宿主侧生成更深入的技术分析输入
 
 ## 模式
 
-### `/miloya-codebase`
+### `/context-codebase`
 
 默认模式。
 
@@ -65,22 +61,23 @@ skill 会生成并复用以下文件：
 - 切换模型或切换 IDE
 - 快速恢复对仓库的整体认知
 
-### `/miloya-codebase refresh`
+### `/context-codebase refresh`
 
-刷新模式。
+强制刷新模式。
 
 行为：
 
-- 在已有索引兼容时优先做增量刷新
-- 增量不安全或信息不完整时回退到全量重建
-- 用刷新后的状态覆盖现有快照产物
+- 不复用缓存
+- 重新扫描仓库
+- 覆盖现有快照
 
 适用场景：
 
-- 代码发生变化后，希望在继续提问前先刷新快照
-- 希望 `read` 和 `report` 能看到新增或修改过的文件
+- 代码发生明显变化
+- 当前快照已经过时
+- 你明确想要重新扫描一遍
 
-### `/miloya-codebase read`
+### `/context-codebase read`
 
 定向检索模式。
 
@@ -96,7 +93,6 @@ skill 会生成并复用以下文件：
   - `searchScope`
   - `hotspots`
   - `externalContext`
-- 在可用时结合持久化 graph 和 change tracker 提升候选上下文与 follow-up 质量
 
 适用场景：
 
@@ -112,7 +108,7 @@ skill 会生成并复用以下文件：
 - 再列 3 到 5 个关键锚点
 - 停在“足够继续深读代码”的边界
 
-### `/miloya-codebase report`
+### `/context-codebase report`
 
 深度分析模式。
 
@@ -153,8 +149,6 @@ skill 会生成并复用以下文件：
 - `importantFiles`：优先阅读文件
 - `chunkCatalog`：可复用的检索锚点
 - `graph`：依赖关系、模块关系、热点区域
-- `graph.json`：持久化的 graph 状态，用于依赖关系和 `nextHops` 复用
-- `changes.json`：最近改动文件、最近提交和更新元数据
 - `retrieval`：任务列表、检索元数据、项目词汇表
 - `contextPacks`：按任务预构建的阅读包
 - `externalContext`：最近变更、文档、团队约定
@@ -163,22 +157,22 @@ skill 会生成并复用以下文件：
 
 ## 检索模型
 
-`miloya-codebase` 不是纯 grep，也不是纯 embedding 语义搜索。当前使用的是混合
+`context-codebase` 不是纯 grep，也不是纯 embedding 语义搜索。当前使用的是混合
 检索流程：
 
 - 快照与索引复用
-- 安全的增量刷新
 - 基于 chunk 的关键词召回
 - 图扩展
 - 高价值文件加权
 - 面向任务的阅读包
-- 最近改动感知
+- 多语言 query 扩展
+- 基于项目词汇表的本地术语扩展
 
 这让 `read` 在保持轻量的同时，仍然能回答不少具体实现问题。
 
 ## 安装结构
 
-当前仓库中，可分发的 skill 源文件位于 `./miloya-codebase/`。
+当前仓库中，可分发的 skill 源文件位于 `./context-codebase/`。
 
 本仓库的目录结构：
 
@@ -186,7 +180,7 @@ skill 会生成并复用以下文件：
 .
 ├─ README.md
 ├─ README_zh.md
-└─ miloya-codebase/
+└─ context-codebase/
    ├─ SKILL.md
    ├─ scripts/
    ├─ tests/
@@ -196,7 +190,7 @@ skill 会生成并复用以下文件：
 安装后或分发后的 skill 结构：
 
 ```text
-miloya-codebase/
+context-codebase/
   SKILL.md
   scripts/
     generate.py
@@ -205,7 +199,7 @@ miloya-codebase/
 推荐开发结构：
 
 ```text
-miloya-codebase/
+context-codebase/
   SKILL.md
   scripts/
     generate.py
@@ -231,15 +225,14 @@ miloya-codebase/
 在当前仓库根目录下，可直接这样运行：
 
 ```bash
-python miloya-codebase/scripts/generate.py <项目路径>
-python miloya-codebase/scripts/generate.py <项目路径> --incremental
-python miloya-codebase/scripts/generate.py <项目路径> --force
-python miloya-codebase/scripts/generate.py <项目路径> --read
-python miloya-codebase/scripts/generate.py <项目路径> --read --task feature-delivery --query "skill download flow"
-python miloya-codebase/scripts/generate.py <项目路径> --report --task bugfix-investigation --query "message routing"
+python context-codebase/scripts/generate.py <项目路径>
+python context-codebase/scripts/generate.py <项目路径> --force
+python context-codebase/scripts/generate.py <项目路径> --read
+python context-codebase/scripts/generate.py <项目路径> --read --task feature-delivery --query "skill download flow"
+python context-codebase/scripts/generate.py <项目路径> --report --task bugfix-investigation --query "message routing"
 ```
 
-如果 skill 安装在别的位置，把这里的 `miloya-codebase/` 替换成实际 skill 目录即可。
+如果 skill 安装在别的位置，把这里的 `context-codebase/` 替换成实际 skill 目录即可。
 
 ## 准确性边界
 
@@ -269,7 +262,7 @@ python miloya-codebase/scripts/generate.py <项目路径> --report --task bugfix
 运行测试：
 
 ```bash
-python -m unittest miloya-codebase.tests.test_generate
+python -m unittest context-codebase.tests.test_generate
 ```
 
 当前测试覆盖：
@@ -279,19 +272,17 @@ python -m unittest miloya-codebase.tests.test_generate
 - Python AST 提取
 - JS/TS fallback 报告
 - 快照复用与失效
-- 增量重建与 graph/change state 持久化
 - chunk 与索引生成
 - 任务定向检索
 - read/report payload 结构
+- 多语言 query 扩展
 
 ## 当前状态
 
 当前实现已经适合真实项目里的 context-engine 场景：
 
 - 可复用快照和索引生成
-- 安全的增量更新
 - 图感知检索与任务包
-- 持久化的 graph 与 change-tracker 产物
 - `read` 用于轻量实现定位
 - `report` 用于 deep-pack 生成
 - 核心行为已有回归测试
