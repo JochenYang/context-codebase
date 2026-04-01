@@ -16,11 +16,13 @@ class SemanticChunker:
 
     def chunk_file(self, content: str, filepath: str, language: str) -> list[dict]:
         """对文件进行语义分块"""
+        # 统一路径格式，避免 Windows 反斜杠导致 ID 格式错误
+        filepath = filepath.replace('\\', '/')
         lines = content.splitlines()
         total_lines = len(lines)
 
-        # 小文件保持原样
-        if total_lines <= SMALL_FILE_LINES:
+        # 小文件保持原样（<60 行整块，>=60 行按 AST 边界分块）
+        if total_lines < SMALL_FILE_LINES:
             return [self._create_chunk(filepath, 1, total_lines, "section", "", content, language)]
 
         # 解析 AST
