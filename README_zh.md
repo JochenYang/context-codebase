@@ -39,7 +39,7 @@ skill 会生成并复用以下文件：
 按问题类型选择模式即可：
 
 - `/context-codebase`：生成或复用快照，用于建立整体认知
-- `/context-codebase refresh`：在仓库明显变化后强制重扫
+- `/context-codebase refresh`：在仓库变化后增量更新索引
 - `/context-codebase read`：快速回答具体实现问题
 - `/context-codebase report`：为宿主侧生成更深入的技术分析输入
 
