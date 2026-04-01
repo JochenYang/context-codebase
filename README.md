@@ -1,4 +1,4 @@
-# miloya-codebase
+# context-codebase
 
 <p align="center">
   <strong>Language</strong><br/>
@@ -6,7 +6,7 @@
   <a href="./README_zh.md">简体中文</a>
 </p>
 
-`miloya-codebase` is a project context engine for fast repository orientation,
+`context-codebase` is a project context engine for fast repository orientation,
 cached handoff, and task-focused code retrieval.
 
 It generates reusable artifacts under `repo/progress/` so a new model, a new
@@ -18,7 +18,7 @@ rescanning the whole repository every time.
 Most repo summary tools stop at file trees, language counts, or symbol lists.
 That is usually not enough for practical model handoff.
 
-`miloya-codebase` is built to answer the questions that matter during a real
+`context-codebase` is built to answer the questions that matter during a real
 session:
 
 - What kind of project is this?
@@ -31,10 +31,8 @@ session:
 
 The skill writes reusable outputs to:
 
-- `repo/progress/miloya-codebase.json`
-- `repo/progress/miloya-codebase.index.json`
-- `repo/progress/miloya-codebase.graph.json`
-- `repo/progress/miloya-codebase.changes.json`
+- `repo/progress/context-codebase.json`
+- `repo/progress/context-codebase.index.json`
 
 These artifacts are designed for model consumption first, not just human
 inspection.
@@ -43,17 +41,14 @@ inspection.
 
 Use the mode that matches the question you need answered:
 
-- `/miloya-codebase`: build or reuse a snapshot for high-level orientation
-- `python ... generate.py <project_path> --incremental`: perform a safe
-  lightweight update when prior index data exists
-- `/miloya-codebase refresh`: refresh the snapshot incrementally when possible
-- `python ... generate.py <project_path> --force`: force a full rebuild
-- `/miloya-codebase read`: answer a focused implementation question quickly
-- `/miloya-codebase report`: prepare a deeper host-side technical walkthrough
+- `/context-codebase`: build or reuse a snapshot for high-level orientation
+- `/context-codebase refresh`: force a fresh scan after meaningful repo changes
+- `/context-codebase read`: answer a focused implementation question quickly
+- `/context-codebase report`: prepare a deeper host-side technical walkthrough
 
 ## Modes
 
-### `/miloya-codebase`
+### `/context-codebase`
 
 Default mode.
 
@@ -69,24 +64,23 @@ Use it when:
 - switching models or IDEs
 - rebuilding a high-level mental map of the repo
 
-### `/miloya-codebase refresh`
+### `/context-codebase refresh`
 
-Refresh mode.
+Force-refresh mode.
 
 Behavior:
 
-- refreshes the existing snapshot incrementally when prior index data is
-  compatible
-- falls back to a full rebuild when the delta is unsafe or incomplete
-- overwrites the existing snapshot artifacts with the refreshed state
+- ignores cache reuse
+- rescans the repository
+- overwrites the existing snapshot
 
 Use it when:
 
-- the codebase changed and you want the snapshot updated before more focused
-  queries
-- you want new or modified files reflected in `read` and `report`
+- the codebase changed significantly
+- the current snapshot is stale
+- you explicitly want a fresh scan
 
-### `/miloya-codebase read`
+### `/context-codebase read`
 
 Focused retrieval mode.
 
@@ -102,8 +96,6 @@ Behavior:
   - `searchScope`
   - `hotspots`
   - `externalContext`
-- uses persisted graph and change state when available to improve candidate
-  context and follow-up paths
 
 Use it when:
 
@@ -119,7 +111,7 @@ Use it when:
 - surface 3-5 anchors worth reading next
 - stop before it turns into a long technical report
 
-### `/miloya-codebase report`
+### `/context-codebase report`
 
 Deep-analysis mode.
 
@@ -160,8 +152,6 @@ The snapshot and index expose several layers of context:
 - `importantFiles`: ranked files worth reading first
 - `chunkCatalog`: reusable anchors for retrieval
 - `graph`: dependency edges, module relationships, hotspots
-- `graph.json`: persisted graph state for dependency and `nextHops` reuse
-- `changes.json`: recent changed files, recent commits, and update metadata
 - `retrieval`: task list, retrieval metadata, project vocabulary
 - `contextPacks`: prebuilt task-oriented reading packs
 - `externalContext`: recent changes, docs, conventions
@@ -170,23 +160,23 @@ The snapshot and index expose several layers of context:
 
 ## Retrieval Model
 
-`miloya-codebase` uses a hybrid retrieval flow instead of plain grep or a pure
+`context-codebase` uses a hybrid retrieval flow instead of plain grep or a pure
 embedding-backed semantic search stack:
 
 - snapshot and index reuse
-- safe incremental refreshes
 - chunk-based keyword retrieval
 - graph-aware expansion
 - important-file boosting
 - task-oriented read packs
-- recent-change awareness
+- multilingual query expansion
+- project-vocabulary-driven term expansion
 
 This makes `read` fast enough for handoff workflows while still being useful
 for focused implementation questions.
 
 ## Installation
 
-This repository keeps the distributable skill under `./miloya-codebase/`.
+This repository keeps the distributable skill under `./context-codebase/`.
 
 Repository layout in this repo:
 
@@ -194,7 +184,7 @@ Repository layout in this repo:
 .
 ├─ README.md
 ├─ README_zh.md
-└─ miloya-codebase/
+└─ context-codebase/
    ├─ SKILL.md
    ├─ scripts/
    ├─ tests/
@@ -204,7 +194,7 @@ Repository layout in this repo:
 Packaged or installed skill layout:
 
 ```text
-miloya-codebase/
+context-codebase/
   SKILL.md
   scripts/
     generate.py
@@ -213,7 +203,7 @@ miloya-codebase/
 Recommended development layout:
 
 ```text
-miloya-codebase/
+context-codebase/
   SKILL.md
   scripts/
     generate.py
@@ -239,15 +229,30 @@ Keep generated outputs out of versioned source where possible:
 From this repository root, use:
 
 ```bash
-python miloya-codebase/scripts/generate.py <project_path>
-python miloya-codebase/scripts/generate.py <project_path> --incremental
-python miloya-codebase/scripts/generate.py <project_path> --force
-python miloya-codebase/scripts/generate.py <project_path> --read
-python miloya-codebase/scripts/generate.py <project_path> --read --task feature-delivery --query "skill download flow"
-python miloya-codebase/scripts/generate.py <project_path> --report --task bugfix-investigation --query "message routing"
+python context-codebase/scripts/generate.py <project_path>
+python context-codebase/scripts/generate.py <project_path> --force
+python context-codebase/scripts/generate.py <project_path> --read
+python context-codebase/scripts/generate.py <project_path> --read --task feature-delivery --query "skill download flow"
+python context-codebase/scripts/generate.py <project_path> --report --task bugfix-investigation --query "message routing"
 ```
 
-If the skill is installed elsewhere, replace `miloya-codebase/` with the
+### Enhanced Modes (v2.0)
+
+```bash
+# Semantic chunking mode - AST-based intelligent code partitioning
+python context-codebase/scripts/generate.py <project_path> --semantic
+
+# Incremental mode - Chunk-level change tracking
+python context-codebase/scripts/generate.py <project_path> --incremental
+
+# SQLite index mode - Fast KV queries
+python context-codebase/scripts/generate.py <project_path> --sqlite
+
+# Combined modes
+python context-codebase/scripts/generate.py <project_path> --semantic --incremental --sqlite
+```
+
+If the skill is installed elsewhere, replace `context-codebase/` with the
 actual skill directory.
 
 ## Accuracy Boundary
@@ -279,7 +284,7 @@ at the right code, not to replace exact search in every edge case.
 Run tests with:
 
 ```bash
-python -m unittest miloya-codebase.tests.test_generate
+python -m unittest context-codebase.tests.test_generate
 ```
 
 Current validation covers:
@@ -289,10 +294,10 @@ Current validation covers:
 - Python AST extraction
 - JS/TS fallback reporting
 - snapshot reuse and invalidation
-- incremental rebuilds and persisted graph/change state
 - chunk and index generation
 - task-oriented retrieval
 - read/report payload structure
+- multilingual query expansion
 
 ## Current Status
 
@@ -300,9 +305,7 @@ The current implementation is suitable for active context-engine use in real
 projects:
 
 - reusable snapshot and index generation
-- safe incremental updates
 - graph-aware retrieval and task packs
-- persisted graph and change-tracker artifacts
 - `read` for lightweight implementation lookup
 - `report` for deep-pack generation
 - regression coverage for core behaviors

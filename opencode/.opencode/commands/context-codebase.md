@@ -1,8 +1,8 @@
 ---
-description: Generate or reuse a miloya-codebase project snapshot
+description: Generate or reuse a context-codebase project snapshot
 ---
 
-Load the `miloya-codebase` skill and use it for the current project.
+Load the `context-codebase` skill and use it for the current project.
 
 Requirements:
 
@@ -15,3 +15,8 @@ Requirements:
 - Return a concise project overview based on the skill output.
 - Do not claim the repository was rescanned unless it actually was.
 - Treat this mode as project orientation, not deep analysis.
+
+Enhanced modes (v2.0):
+- `--semantic` - AST-based semantic chunking for better code partitioning
+- `--incremental` - Chunk-level change tracking for faster updates
+- `--sqlite` - SQLite index for fast KV queries

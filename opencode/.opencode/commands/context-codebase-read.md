@@ -1,8 +1,8 @@
 ---
-description: Query focused implementation details with miloya-codebase
+description: Query focused implementation details with context-codebase
 ---
 
-Load the `miloya-codebase` skill and use read mode for the current project.
+Load the `context-codebase` skill and use read mode for the current project.
 
 Question: $ARGUMENTS
 
@@ -14,7 +14,7 @@ Requirements:
 - If the current workspace is not a single project root, stop and say so.
 - Treat read mode as consuming the existing snapshot and index.
 - If the snapshot is missing, do not pretend read mode can use cached context;
-  run the default `/miloya-codebase` flow first.
+  run the default `/context-codebase` flow first.
 - Do not imply a full repo rescan.
 - Start from `files`, `snippets`, `flowAnchors`, `nextHops`, and `searchScope`.
 - Only widen to repo search if the payload is insufficient.
@@ -31,7 +31,7 @@ Requirements:
   original question text. Never invent an escaped string from transliteration.
 - If the read payload is weak because the query was mangled, fix the query input
   method first before widening to repo search.
-- Do not rerun `miloya-codebase --read` with a different `--task`, alternate
+- Do not rerun `context-codebase --read` with a different `--task`, alternate
   flags, or a lightly rewritten query just to widen search.
 - If the first read payload is weak but valid, keep that payload and move to
   direct repo search within the suggested `searchScope`.

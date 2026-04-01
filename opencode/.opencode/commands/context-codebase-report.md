@@ -1,8 +1,8 @@
 ---
-description: Prepare deep analysis context with miloya-codebase
+description: Prepare deep analysis context with context-codebase
 ---
 
-Load the `miloya-codebase` skill and use report mode for the current project.
+Load the `context-codebase` skill and use report mode for the current project.
 
 Question: $ARGUMENTS
 
