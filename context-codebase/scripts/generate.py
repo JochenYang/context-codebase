@@ -27,7 +27,6 @@ from context_engine.retrieval import build_retrieval_artifacts, retrieve_chunks
 from context_engine.semantic_chunker import SemanticChunker
 from context_engine.chunk_tracker import ChunkTracker
 from context_engine.sqlite_index import SQLiteIndex
-from context_engine.multi_lang_analyzer import MultiLangAnalyzer
 
 try:
     import tomllib
@@ -1343,6 +1342,7 @@ def save_index_state(
     file_records: list[dict],
     source_fingerprint: str,
 ) -> None:
+    global USE_INCREMENTAL_MODE
     payload = {
         'version': INDEX_STATE_VERSION,
         'generatedAt': utc_now_iso(),
@@ -1353,55 +1353,59 @@ def save_index_state(
 
     # Add incremental tracking when enabled
     if USE_INCREMENTAL_MODE:
-        tracker = ChunkTracker()
-        existing_index_state = load_existing_index_state(index_state_file)
+        try:
+            tracker = ChunkTracker()
+            existing_index_state = load_existing_index_state(index_state_file)
 
-        if existing_index_state and 'chunkStates' in existing_index_state:
-            # Load old chunk states
-            old_states = {}
-            for chunk_id, state_data in existing_index_state.get('chunkStates', {}).items():
-                from context_engine.chunk_tracker import ChunkState
-                old_states[chunk_id] = ChunkState(
-                    chunk_id=state_data['chunk_id'],
-                    content_hash=state_data['content_hash'],
-                    version=state_data.get('version', 1)
-                )
+            if existing_index_state and 'chunkStates' in existing_index_state:
+                # Load old chunk states
+                old_states = {}
+                for chunk_id, state_data in existing_index_state.get('chunkStates', {}).items():
+                    from context_engine.chunk_tracker import ChunkState
+                    old_states[chunk_id] = ChunkState(
+                        chunk_id=state_data['chunk_id'],
+                        content_hash=state_data['content_hash'],
+                        version=state_data.get('version', 1)
+                    )
 
-            # Track new chunks
-            new_states = tracker.track(chunks)
+                # Track new chunks
+                new_states = tracker.track(chunks)
 
-            # Merge states with version tracking
-            merged_states = tracker.merge_states(old_states, new_states)
+                # Merge states with version tracking
+                merged_states = tracker.merge_states(old_states, new_states)
 
-            # Add change set info to payload
-            change_set = tracker.diff(old_states, new_states)
-            payload['_incremental'] = {
-                'added': len(change_set.added),
-                'modified': len(change_set.modified),
-                'deleted': len(change_set.deleted),
-                'unchanged': len(change_set.unchanged),
-            }
-
-            # Convert merged states back to dict format for JSON serialization
-            payload['chunkStates'] = {
-                chunk_id: {
-                    'chunk_id': state.chunk_id,
-                    'content_hash': state.content_hash,
-                    'version': state.version
+                # Add change set info to payload
+                change_set = tracker.diff(old_states, new_states)
+                payload['_incremental'] = {
+                    'added': len(change_set.added),
+                    'modified': len(change_set.modified),
+                    'deleted': len(change_set.deleted),
+                    'unchanged': len(change_set.unchanged),
                 }
-                for chunk_id, state in merged_states.items()
-            }
-        else:
-            # First run - initialize chunk states
-            new_states = tracker.track(chunks)
-            payload['chunkStates'] = {
-                chunk_id: {
-                    'chunk_id': state.chunk_id,
-                    'content_hash': state.content_hash,
-                    'version': state.version
+
+                # Convert merged states back to dict format for JSON serialization
+                payload['chunkStates'] = {
+                    chunk_id: {
+                        'chunk_id': state.chunk_id,
+                        'content_hash': state.content_hash,
+                        'version': state.version
+                    }
+                    for chunk_id, state in merged_states.items()
                 }
-                for chunk_id, state in new_states.items()
-            }
+            else:
+                # First run - initialize chunk states
+                new_states = tracker.track(chunks)
+                payload['chunkStates'] = {
+                    chunk_id: {
+                        'chunk_id': state.chunk_id,
+                        'content_hash': state.content_hash,
+                        'version': state.version
+                    }
+                    for chunk_id, state in new_states.items()
+                }
+        except Exception:
+            print(f'WARNING: ChunkTracker failed, disabling incremental mode')
+            USE_INCREMENTAL_MODE = False
 
     save_index_state_payload(index_state_file, payload)
 
@@ -1422,32 +1426,35 @@ def write_snapshot(output_file: Path, snapshot: dict) -> None:
 
     # Write to SQLite index when enabled
     if USE_SQLITE_INDEX:
-        db_path = str(output_file.parent / f'{SKILL_NAME}.db')
-        sqlite_index = SQLiteIndex(db_path)
+        try:
+            db_path = str(output_file.parent / f'{SKILL_NAME}.db')
+            sqlite_index = SQLiteIndex(db_path)
 
-        chunks = snapshot.get('chunks', [])
-        if chunks:
-            # Normalize chunk format for SQLiteIndex
-            normalized_chunks = []
-            for chunk in chunks:
-                normalized_chunks.append({
-                    'id': chunk.get('id', ''),
-                    'path': chunk.get('path', ''),
-                    'startLine': chunk.get('startLine'),
-                    'endLine': chunk.get('endLine'),
-                    'kind': chunk.get('kind', ''),
-                    'name': chunk.get('name', ''),
-                    'language': chunk.get('language', ''),
-                    'signals': chunk.get('signals', []),
-                    'preview': chunk.get('preview', ''),
-                })
-            sqlite_index.upsert_chunks(normalized_chunks)
+            chunks = snapshot.get('chunks', [])
+            if chunks:
+                # Normalize chunk format for SQLiteIndex
+                normalized_chunks = []
+                for chunk in chunks:
+                    normalized_chunks.append({
+                        'id': chunk.get('id', ''),
+                        'path': chunk.get('path', ''),
+                        'startLine': chunk.get('startLine'),
+                        'endLine': chunk.get('endLine'),
+                        'kind': chunk.get('kind', ''),
+                        'name': chunk.get('name', ''),
+                        'language': chunk.get('language', ''),
+                        'signals': chunk.get('signals', []),
+                        'preview': chunk.get('preview', ''),
+                    })
+                sqlite_index.upsert_chunks(normalized_chunks)
 
-            # Delete stale chunks (not in current snapshot)
-            valid_ids = {chunk['id'] for chunk in chunks if chunk.get('id')}
-            sqlite_index.delete_stale(valid_ids)
+                # Delete stale chunks (not in current snapshot)
+                valid_ids = {chunk['id'] for chunk in chunks if chunk.get('id')}
+                sqlite_index.delete_stale(valid_ids)
 
-        sqlite_index.close()
+            sqlite_index.close()
+        except Exception:
+            print(f'WARNING: SQLiteIndex failed, snapshot written without index update')
 
 
 def summarize_modules_from_records(file_records: list[dict]) -> dict[str, str]:
@@ -1626,13 +1633,16 @@ def build_read_payload(
     graph = snapshot.get('graph', {})
     important_files = snapshot.get('importantFiles', [])
     representative_snippets = snapshot.get('representativeSnippets', [])
-    csr_context = build_csr_read_enhancement(
-        snapshot,
-        index_state,
-        selected_task,
-        normalized_query,
-        base_query_intent,
-    )
+    try:
+        csr_context = build_csr_read_enhancement(
+            snapshot,
+            index_state,
+            selected_task,
+            normalized_query,
+            base_query_intent,
+        )
+    except Exception:
+        csr_context = {}
     query_intent = enrich_query_intent_with_snapshot(
         snapshot,
         merge_query_intent(base_query_intent, csr_context),
