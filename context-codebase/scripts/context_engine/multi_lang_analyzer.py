@@ -126,7 +126,8 @@ class MultiLangAnalyzer:
     def _analyze_js(self, content: str, filepath: str) -> dict:
         """分析 JavaScript/TypeScript 文件"""
         result = self._base_analysis(content, filepath)
-        result["language"] = "javascript" if ".js" in filepath else "typescript"
+        ext = Path(filepath).suffix.lower()
+        result["language"] = "typescript" if ext in (".ts", ".tsx") else "javascript"
 
         # import xxx from 'yyy'
         for match in re.finditer(r"import\s+(?:{\s*)?(\w+)(?:\s*,)?\s*.*?\s+from\s+['\"]([^'\"]+)['\"]", content):
