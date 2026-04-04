@@ -48,13 +48,15 @@ SKILL_NAME = 'context-codebase'
 LEGACY_SKILL_NAMES = ['codebase-context', 'miloya-codebase']
 SNAPSHOT_FILENAME = f'{SKILL_NAME}.json'
 INDEX_STATE_FILENAME = f'{SKILL_NAME}.index.json'
+SQLITE_FILENAME = f'{SKILL_NAME}.db'
 LEGACY_SNAPSHOT_FILENAMES = [f'{legacy_name}.json' for legacy_name in LEGACY_SKILL_NAMES]
 LEGACY_INDEX_STATE_FILENAMES = [f'{legacy_name}.index.json' for legacy_name in LEGACY_SKILL_NAMES]
+LEGACY_SQLITE_FILENAMES = [f'{legacy_name}.db' for legacy_name in LEGACY_SKILL_NAMES]
 
 # Feature flags for advanced chunking modes
 USE_SEMANTIC_CHUNKING = False
 USE_INCREMENTAL_MODE = False
-USE_SQLITE_INDEX = False
+USE_SQLITE_INDEX = True
 
 EXCLUDE_DIRS = {
     'node_modules', '.git', 'dist', 'build', 'venv', '__pycache__',
@@ -1047,7 +1049,8 @@ def build_chunks_semantic(file_records: list[dict]) -> list[dict]:
             continue
 
         # SemanticChunker uses lowercase language names
-        language = record.get('language', 'unknown')
+        raw_language = record.get('language')
+        language = raw_language if isinstance(raw_language, str) and raw_language else 'unknown'
         lang_map = {
             'Python': 'python',
             'JavaScript': 'javascript',
@@ -1239,6 +1242,10 @@ def resolve_index_state_file(progress_dir: Path) -> Path:
     return resolve_progress_artifact(progress_dir, INDEX_STATE_FILENAME, LEGACY_INDEX_STATE_FILENAMES)
 
 
+def resolve_sqlite_file(progress_dir: Path) -> Path:
+    return resolve_progress_artifact(progress_dir, SQLITE_FILENAME, LEGACY_SQLITE_FILENAMES)
+
+
 def diff_index_state(previous_state: dict | None, current_signatures: dict[str, dict]) -> dict:
     previous_files = (previous_state or {}).get('files', {})
     previous_paths = set(previous_files.keys())
@@ -1420,21 +1427,21 @@ def load_existing_snapshot(output_file: Path) -> dict | None:
         return None
 
 
-def write_snapshot(output_file: Path, snapshot: dict) -> None:
+def write_snapshot(output_file: Path, snapshot: dict, chunks: list[dict] | None = None) -> None:
     output_file.parent.mkdir(parents=True, exist_ok=True)
     output_file.write_text(json.dumps(snapshot, indent=2, ensure_ascii=False), encoding='utf-8')
 
     # Write to SQLite index when enabled
     if USE_SQLITE_INDEX:
         try:
-            db_path = str(output_file.parent / f'{SKILL_NAME}.db')
+            db_path = str(output_file.parent / SQLITE_FILENAME)
             sqlite_index = SQLiteIndex(db_path)
 
-            chunks = snapshot.get('chunks', [])
-            if chunks:
+            sqlite_chunks = chunks if chunks is not None else snapshot.get('chunks', [])
+            if sqlite_chunks:
                 # Normalize chunk format for SQLiteIndex
                 normalized_chunks = []
-                for chunk in chunks:
+                for chunk in sqlite_chunks:
                     normalized_chunks.append({
                         'id': chunk.get('id', ''),
                         'path': chunk.get('path', ''),
@@ -1449,7 +1456,7 @@ def write_snapshot(output_file: Path, snapshot: dict) -> None:
                 sqlite_index.upsert_chunks(normalized_chunks)
 
                 # Delete stale chunks (not in current snapshot)
-                valid_ids = {chunk['id'] for chunk in chunks if chunk.get('id')}
+                valid_ids = {chunk['id'] for chunk in sqlite_chunks if chunk.get('id')}
                 sqlite_index.delete_stale(valid_ids)
 
             sqlite_index.close()
@@ -1556,13 +1563,12 @@ def build_focus_context_pack(
     task: str,
     snapshot: dict,
     index_state: dict | None,
+    sqlite_db_path: str | None = None,
 ) -> dict | None:
-    if not query or not index_state:
+    if not query:
         return None
 
-    chunks = index_state.get('chunks', [])
-    if not chunks:
-        return None
+    index_state = index_state or {}
 
     graph = snapshot.get('graph', {})
     important_files = snapshot.get('importantFiles', [])
@@ -1576,6 +1582,18 @@ def build_focus_context_pack(
         snapshot.get('retrieval', {}),
     )
     expanded_query = ' '.join(expanded_query_terms) or query
+    chunks, retrieval_diagnostics = load_sqlite_query_chunks(sqlite_db_path, query, expanded_query_terms)
+    if not chunks:
+        chunks = index_state.get('chunks', [])
+        if chunks:
+            retrieval_diagnostics = {
+                **retrieval_diagnostics,
+                'backend': 'index-json',
+                'fallbackUsed': retrieval_diagnostics.get('sqliteAvailable', False),
+                'jsonChunkCount': len(chunks),
+            }
+    if not chunks:
+        return None
     file_dependency_map = {
         item['path']: item['dependsOn']
         for item in graph.get('fileDependencies', [])
@@ -1600,6 +1618,7 @@ def build_focus_context_pack(
         'query': query,
         'matches': matches,
         'files': list(dict.fromkeys(related_paths))[:12],
+        'retrievalDiagnostics': retrieval_diagnostics,
     }
 
 
@@ -1618,11 +1637,75 @@ def expand_query_terms_for_retrieval(query_intent: dict, retrieval: dict) -> lis
     return expanded_terms[:36]
 
 
+def load_sqlite_query_chunks(
+    sqlite_db_path: str | None,
+    query: str,
+    expanded_query_terms: list[str],
+    limit: int = 36,
+) -> tuple[list[dict], dict]:
+    diagnostics = {
+        'backend': 'none',
+        'sqliteEnabled': bool(sqlite_db_path),
+        'sqliteAvailable': False,
+        'sqliteHitCount': 0,
+        'fallbackUsed': False,
+        'jsonChunkCount': 0,
+    }
+    if not sqlite_db_path:
+        return [], diagnostics
+
+    db_path = Path(sqlite_db_path)
+    if not db_path.exists():
+        return [], diagnostics
+    diagnostics['sqliteAvailable'] = True
+
+    query_terms = []
+    normalized_query = normalize_query_text(query)
+    if normalized_query:
+        query_terms.append(normalized_query)
+    query_terms.extend(term.strip() for term in expanded_query_terms if term and term.strip())
+
+    deduped_terms = []
+    seen_terms = set()
+    for term in query_terms:
+        lowered = term.lower()
+        if len(lowered) < 2 or lowered in seen_terms:
+            continue
+        seen_terms.add(lowered)
+        deduped_terms.append(term)
+
+    if not deduped_terms:
+        return [], diagnostics
+
+    collected: dict[str, dict] = {}
+
+    try:
+        sqlite_index = SQLiteIndex(str(db_path))
+        for term in deduped_terms[:12]:
+            for chunk in sqlite_index.search(term, limit=limit):
+                chunk_id = chunk.get('id')
+                if not chunk_id or chunk_id in collected:
+                    continue
+                collected[chunk_id] = chunk
+                if len(collected) >= limit * 3:
+                    diagnostics['backend'] = 'sqlite'
+                    diagnostics['sqliteHitCount'] = len(collected)
+                    return list(collected.values()), diagnostics
+    except Exception:
+        return [], diagnostics
+
+    if collected:
+        diagnostics['backend'] = 'sqlite'
+        diagnostics['sqliteHitCount'] = len(collected)
+    return list(collected.values()), diagnostics
+
+
 def build_read_payload(
     snapshot: dict,
     index_state: dict | None,
     task: str,
     query: str | None,
+    sqlite_db_path: str | None = None,
 ) -> dict:
     normalized_query = normalize_query_text(query)
     retrieval = snapshot.get('retrieval', {})
@@ -1650,12 +1733,27 @@ def build_read_payload(
     read_profile = select_read_profile(query_intent)
     hinted_file_paths = collect_hint_file_paths(index_state, query_intent, read_profile)
     read_limits = determine_read_limits(query_intent)
+    retrieval_diagnostics = {
+        'backend': 'context-pack',
+        'sqliteEnabled': bool(sqlite_db_path),
+        'sqliteAvailable': bool(sqlite_db_path and Path(sqlite_db_path).exists()),
+        'sqliteHitCount': 0,
+        'fallbackUsed': False,
+        'jsonChunkCount': len((index_state or {}).get('chunks', [])),
+    }
 
     if normalized_query:
-        focus_pack = build_focus_context_pack(normalized_query, selected_task, snapshot, index_state)
+        focus_pack = build_focus_context_pack(
+            normalized_query,
+            selected_task,
+            snapshot,
+            index_state,
+            sqlite_db_path=sqlite_db_path,
+        )
         snippet_items = (focus_pack or {}).get('matches', [])
         file_paths = (focus_pack or {}).get('files', [])
         task_description = describe_task(snapshot, selected_task)
+        retrieval_diagnostics = (focus_pack or {}).get('retrievalDiagnostics', retrieval_diagnostics)
     else:
         task_pack = snapshot.get('contextPacks', {}).get(selected_task, {})
         snippet_items = task_pack.get('chunks', [])
@@ -1690,6 +1788,8 @@ def build_read_payload(
         },
         'queryIntent': query_intent,
         'queryProfile': read_profile['name'],
+        'retrievalBackend': retrieval_diagnostics.get('backend', 'context-pack'),
+        'retrievalDiagnostics': retrieval_diagnostics,
         'taskDescription': task_description,
         'availableTasks': available_tasks,
         'contextEngine': {
@@ -1920,8 +2020,15 @@ def build_report_payload(
     index_state: dict | None,
     task: str,
     query: str | None,
+    sqlite_db_path: str | None = None,
 ) -> dict:
-    read_payload = build_read_payload(snapshot, index_state, task, query)
+    read_payload = build_read_payload(
+        snapshot,
+        index_state,
+        task,
+        query,
+        sqlite_db_path=sqlite_db_path,
+    )
     query_intent = read_payload.get('queryIntent', {})
     report_limits = determine_report_limits(query_intent)
     graph = snapshot.get('graph', {})
@@ -2071,24 +2178,12 @@ def extract_query_terms(query: str | None) -> list[str]:
     raw_terms = extract_text_terms(query)
     collected: list[str] = []
     seen = set()
-
     for term in raw_terms:
-        if re.fullmatch(r'[\u4e00-\u9fff]+', term):
-            if len(term) <= 4 and term not in seen:
-                seen.add(term)
-                collected.append(term)
-            elif len(term) > 4:
-                for index in range(len(term) - 1):
-                    candidate = term[index:index + 2]
-                    if candidate not in seen:
-                        seen.add(candidate)
-                        collected.append(candidate)
+        token = term.strip()
+        if len(token) < 2 or token in seen:
             continue
-
-        if term not in seen:
-            seen.add(term)
-            collected.append(term)
-
+        seen.add(token)
+        collected.append(token)
     return collected[:24]
 
 
@@ -2392,25 +2487,32 @@ def infer_query_intent_framework(query: str | None) -> dict:
             'preferredTask': 'understand-project',
         }
 
-    lowered = (normalize_query_text(query) or query).lower()
-    terms = extract_query_terms(lowered)
+    terms = extract_query_terms(query)
     keywords = expand_query_terms(terms)
     term_set = set(terms) | set(keywords)
     labels = []
 
-    if contains_any_term(term_set, {'bug', 'fix', 'error', 'fail', 'failed', 'crash', 'issue', '异常', '报错', '失败', '出错'}):
+    bug_terms = {'bug', 'fix', 'error', 'fail', 'failed', 'crash', 'issue', '异常', '报错', '失败', '出错'}
+    review_terms = {'review', 'audit', 'risk', '审查', '检查', '风险'}
+    feature_terms = {'feature', 'implement', 'implementation', 'integration', 'integrate', 'connect', 'connection', 'link', 'linked', 'bridge', '接入', '实现', '新增', '增加', '链接', '对接', '联动', '串联'}
+    trace_terms = {'route', 'router', 'path', 'dispatch', 'handler', 'call', 'calling', 'flow', '调用', '链路', '流程', '路由', '入口', '对接', '联动'}
+    config_terms = {'config', 'setting', 'settings', 'env', 'schema', 'workflow', 'pipeline', 'release', 'ci', 'cd', 'action', 'actions', '配置', '环境'}
+    type_terms = {'type', 'types', 'schema', 'model', 'interface', '类型', '模型', '结构'}
+    test_terms = {'test', 'tests', 'spec', 'e2e', 'fixture', '测试', '用例'}
+
+    if contains_any_term(term_set, bug_terms):
         labels.append('bugfix')
-    if contains_any_term(term_set, {'review', 'audit', 'risk', '审查', '检查', '风险'}):
+    if contains_any_term(term_set, review_terms):
         labels.append('review')
-    if contains_any_term(term_set, {'feature', 'implement', 'implementation', 'integration', 'integrate', '接入', '实现', '新增', '增加'}):
+    if contains_any_term(term_set, feature_terms):
         labels.append('feature')
-    if contains_any_term(term_set, {'route', 'router', 'path', 'dispatch', 'handler', '调用', '链路', '流程', '路由', '入口'}):
+    if contains_any_term(term_set, trace_terms):
         labels.append('trace')
-    if contains_any_term(term_set, {'config', 'setting', 'settings', 'env', 'schema', 'workflow', 'pipeline', 'release', 'ci', 'cd', 'action', 'actions', '配置', '环境'}):
+    if contains_any_term(term_set, config_terms):
         labels.append('config')
-    if contains_any_term(term_set, {'type', 'types', 'schema', 'model', 'interface', '类型', '模型', '结构'}):
+    if contains_any_term(term_set, type_terms):
         labels.append('types')
-    if contains_any_term(term_set, {'test', 'tests', 'spec', 'e2e', 'fixture', '测试', '用例'}):
+    if contains_any_term(term_set, test_terms):
         labels.append('tests')
 
     preferred_task = 'understand-project'
@@ -2458,6 +2560,11 @@ def rerank_read_matches(matches: list[dict], query_intent: dict, read_profile: d
             bonus += 12
         if is_documentation_file(path) and not is_documentation_query(query_intent):
             bonus -= 18
+        if kind == 'link' and (
+            'feature' in query_intent.get('labels', [])
+            or 'trace' in query_intent.get('labels', [])
+        ) and not is_documentation_query(query_intent):
+            bonus -= 26
         if is_script_like_file(path) and not is_script_query(query_intent):
             bonus -= 10
         if is_probably_test_path(path) and not test_query:
@@ -3497,7 +3604,7 @@ def generate_snapshot(project_path: str, force: bool = False) -> dict:
     }
 
     # Save to file
-    write_snapshot(output_file, snapshot)
+    write_snapshot(output_file, snapshot, chunks=chunks)
     save_index_state(index_state_file, current_signatures, chunks, file_records, source_fingerprint)
 
     print(f"Snapshot saved to: {output_file}", file=sys.stderr)
@@ -3563,7 +3670,7 @@ def refresh_index(project_path: str) -> dict:
             previous_chunks,
             existing_snapshot.get('importantFiles', []),
         )
-        write_snapshot(output_file, existing_snapshot)
+        write_snapshot(output_file, existing_snapshot, chunks=previous_chunks)
         return existing_snapshot
 
     changed_files = [str(base / path) for path in sorted(changed_or_new_paths)]
@@ -3615,7 +3722,7 @@ def refresh_index(project_path: str) -> dict:
         next_chunks,
         existing_snapshot.get('importantFiles', []),
     )
-    write_snapshot(output_file, existing_snapshot)
+    write_snapshot(output_file, existing_snapshot, chunks=next_chunks)
     return existing_snapshot
 
 
@@ -3626,7 +3733,19 @@ def read_query_input(
     use_stdin: bool = False,
 ) -> str | None:
     if escaped_query:
-        return codecs.decode(escaped_query, 'unicode_escape').strip() or None
+        raw = escaped_query.strip()
+        if not raw:
+            return None
+        # `--query-escaped` is commonly used with ascii escape sequences (\uXXXX).
+        # If no backslash escape marker is present, treat it as plain text to avoid
+        # corrupting already-decoded unicode input.
+        if '\\' not in raw:
+            return raw
+        try:
+            decoded = codecs.decode(raw, 'unicode_escape').strip()
+            return decoded or raw
+        except Exception:
+            return raw
 
     if query_file:
         query_path = Path(query_file)
@@ -3646,7 +3765,7 @@ def main():
             "Usage: python generate.py <project_path> [refresh|--refresh|read|--read|report|--report] "
             "[--task <task>] [--query <query> | --query-escaped <ascii_escaped_query> "
             "| --query-file <utf8_file> | --query-stdin] "
-            "[--semantic] [--incremental] [--sqlite]",
+            "[--semantic] [--incremental] [--sqlite] [--no-sqlite]",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -3669,7 +3788,7 @@ def main():
     global USE_SEMANTIC_CHUNKING, USE_INCREMENTAL_MODE, USE_SQLITE_INDEX
     USE_SEMANTIC_CHUNKING = '--semantic' in cli_args
     USE_INCREMENTAL_MODE = '--incremental' in cli_args
-    USE_SQLITE_INDEX = '--sqlite' in cli_args
+    USE_SQLITE_INDEX = '--no-sqlite' not in cli_args
 
     if '--task' in cli_args:
         task_index = cli_args.index('--task')
@@ -3704,17 +3823,19 @@ def main():
     if report_mode:
         base = Path(project_path)
         progress_dir = base / 'repo' / 'progress'
+        sqlite_db_path = str(resolve_sqlite_file(progress_dir))
         snapshot = load_existing_snapshot(resolve_snapshot_file(progress_dir))
         if not snapshot or refresh_mode:
             snapshot = refresh_index(project_path) if refresh_mode else generate_snapshot(project_path, force=False)
 
         index_state = load_existing_index_state(resolve_index_state_file(progress_dir))
-        write_json_stdout(build_report_payload(snapshot, index_state, task, query))
+        write_json_stdout(build_report_payload(snapshot, index_state, task, query, sqlite_db_path=sqlite_db_path))
         return
 
     if read_mode:
         base = Path(project_path)
         progress_dir = base / 'repo' / 'progress'
+        sqlite_db_path = str(resolve_sqlite_file(progress_dir))
         snapshot = load_existing_snapshot(resolve_snapshot_file(progress_dir))
         if not snapshot and not refresh_mode:
             print(
@@ -3732,7 +3853,7 @@ def main():
             sys.exit(1)
 
         index_state = load_existing_index_state(resolve_index_state_file(progress_dir))
-        write_json_stdout(build_read_payload(snapshot, index_state, task, query))
+        write_json_stdout(build_read_payload(snapshot, index_state, task, query, sqlite_db_path=sqlite_db_path))
         return
 
     snapshot = refresh_index(project_path) if refresh_mode else generate_snapshot(project_path, force=False)
@@ -3740,7 +3861,8 @@ def main():
     if query:
         progress_dir = Path(project_path) / 'repo' / 'progress'
         index_state = load_existing_index_state(resolve_index_state_file(progress_dir))
-        focus_pack = build_focus_context_pack(query, task, snapshot, index_state)
+        sqlite_db_path = str(resolve_sqlite_file(progress_dir))
+        focus_pack = build_focus_context_pack(query, task, snapshot, index_state, sqlite_db_path=sqlite_db_path)
         write_json_stdout(focus_pack or snapshot)
         return
 
