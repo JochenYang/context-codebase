@@ -192,6 +192,11 @@ For `report`:
 
 For focused questions, prefer `--task` with a UTF-8 safe query channel.
 
+**⚠️ Cross-Lingual Search Limitation:**
+- If your internal reasoning or the user's prompt is in a non-English language (e.g., Chinese) but the codebase uses English identifiers, you **MUST append English keyword translations** to your query string.
+- *Why?* The backend uses literal FTS5 BM25 token matching, which will yield 0 hits if lexical characters do not overlap.
+- *Example:* Instead of `--query "记忆模块"`, use `--query "记忆模块 memory module"`.
+
 On Windows or any environment where non-ASCII query text may become mojibake:
 
 - Prefer `--query-escaped <ascii_only_query>`

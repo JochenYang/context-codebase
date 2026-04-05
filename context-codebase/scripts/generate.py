@@ -34,7 +34,7 @@ except ModuleNotFoundError:  # pragma: no cover
     tomllib = None
 
 
-SNAPSHOT_VERSION = '3.0'
+from context_engine.config import *  # SNAPSHOT_VERSION = '3.0'
 INDEX_STATE_VERSION = '1.0'
 MAX_TEXT_FILE_BYTES = 512 * 1024
 MAX_IMPORTANT_FILES = 15
@@ -1760,15 +1760,29 @@ def build_read_payload(
         file_paths = build_default_read_paths(snapshot, task_pack)
         task_description = task_pack.get('description') or describe_task(snapshot, selected_task)
 
-    snippet_items = merge_ranked_matches(csr_context.get('matches', []), snippet_items)
-    file_paths = merge_ordered_paths(csr_context.get('files', []), file_paths)
-    file_paths = merge_ordered_paths(hinted_file_paths, file_paths)
+    snippet_items = blend_match_sources(
+        csr_context.get('matches', []),
+        snippet_items,
+        query_intent,
+    )
+    file_paths = merge_ordered_paths(file_paths, csr_context.get('files', []))
+    file_paths = merge_ordered_paths(file_paths, hinted_file_paths)
     snippet_items = rerank_read_matches(snippet_items, query_intent, read_profile)
+    snippet_items = prioritize_matches_by_coverage(snippet_items, query_intent)
     file_paths = prioritize_read_file_paths(file_paths, snippet_items, query_intent, read_profile)
+    file_paths = prioritize_files_by_coverage(file_paths, snippet_items, query_intent)
     file_paths = refine_read_file_paths(snapshot, file_paths, query_intent, read_profile)
     search_scope = merge_search_scope(
         build_read_search_scope(snapshot, file_paths[:read_limits['files']]),
         csr_context,
+    )
+    ranking_diagnostics = build_ranking_diagnostics(
+        snippet_items,
+        file_paths,
+        query_intent,
+        csr_context,
+        topk_snippets=read_limits['snippets'],
+        topk_files=read_limits['files'],
     )
 
     return {
@@ -1790,6 +1804,7 @@ def build_read_payload(
         'queryProfile': read_profile['name'],
         'retrievalBackend': retrieval_diagnostics.get('backend', 'context-pack'),
         'retrievalDiagnostics': retrieval_diagnostics,
+        'rankingDiagnostics': ranking_diagnostics,
         'taskDescription': task_description,
         'availableTasks': available_tasks,
         'contextEngine': {
@@ -1859,8 +1874,6 @@ def merge_query_intent(query_intent: dict, csr_context: dict) -> dict:
     labels = list(dict.fromkeys([
         *(query_intent.get('labels', []) or []),
         'csr-routed' if csr_context.get('enabled') else '',
-        route.get('profile', ''),
-        route.get('subfocus', ''),
     ]))
     merged['labels'] = [label for label in labels if label]
     if route.get('task'):
@@ -1911,6 +1924,10 @@ def build_dynamic_path_hints(snapshot: dict, query_intent: dict) -> list[str]:
         overlap_count = count_fuzzy_term_overlap(terms, query_terms)
         if not overlap_count:
             continue
+        # Generic denoise: for multi-term queries, require at least two term hits
+        # to avoid broad single-token matches dominating dynamic hints.
+        if len(query_terms) >= 3 and overlap_count < 2:
+            continue
         score = overlap_count * 12
         basename_terms = set(extract_text_terms(Path(normalized).name))
         score += count_fuzzy_term_overlap(basename_terms, query_terms) * 8
@@ -1939,6 +1956,189 @@ def merge_ranked_matches(primary: list[dict], secondary: list[dict]) -> list[dic
     return merged
 
 
+def query_term_set(query_intent: dict) -> set[str]:
+    return set(query_intent.get('keywords', [])) | set(query_intent.get('terms', []))
+
+
+def compute_match_coverage(item: dict, query_terms: set[str]) -> float:
+    if not query_terms:
+        return 1.0
+    haystack = ' '.join([
+        item.get('path') or '',
+        item.get('kind') or '',
+        item.get('preview') or '',
+        ' '.join(item.get('signals', []) or []),
+    ])
+    haystack_terms = set(extract_text_terms(haystack))
+    overlap = count_fuzzy_term_overlap(haystack_terms, query_terms)
+    return min(1.0, overlap / max(len(query_terms), 1))
+
+
+def compute_path_coverage(path: str, query_terms: set[str]) -> float:
+    if not query_terms:
+        return 1.0
+    path_terms = set(extract_text_terms(path))
+    overlap = count_fuzzy_term_overlap(path_terms, query_terms)
+    return min(1.0, overlap / max(len(query_terms), 1))
+
+
+def blend_match_sources(
+    structural_matches: list[dict],
+    lexical_matches: list[dict],
+    query_intent: dict,
+    lexical_weight: float = 0.8,
+    structural_weight: float = 0.2,
+) -> list[dict]:
+    query_terms = query_term_set(query_intent)
+    merged: dict[object, dict] = {}
+
+    def make_key(item: dict) -> object:
+        return item.get('id') or (
+            item.get('path'),
+            item.get('startLine'),
+            item.get('endLine'),
+            item.get('kind'),
+        )
+
+    for item in lexical_matches:
+        key = make_key(item)
+        merged[key] = {
+            'item': dict(item),
+            'lexical': float(item.get('score', 0) or 0),
+            'structural': 0.0,
+        }
+
+    for item in structural_matches:
+        key = make_key(item)
+        existing = merged.get(key)
+        if existing is None:
+            merged[key] = {
+                'item': dict(item),
+                'lexical': 0.0,
+                'structural': float(item.get('score', 0) or 0),
+            }
+            continue
+        existing['structural'] = max(existing['structural'], float(item.get('score', 0) or 0))
+        if existing['lexical'] <= 0:
+            existing['item'] = dict(item)
+
+    ranked = []
+    for payload in merged.values():
+        item = payload['item']
+        coverage = compute_match_coverage(item, query_terms)
+        blended = (
+            lexical_weight * payload['lexical']
+            + structural_weight * payload['structural']
+            + coverage * 24.0
+        )
+        if payload['lexical'] <= 0 and payload['structural'] > 0:
+            blended -= 72.0 + max(0.0, (0.6 - coverage) * 80.0)
+        enriched = dict(item)
+        enriched['score'] = blended
+        enriched['coverage'] = round(coverage, 3)
+        enriched['lexicalScore'] = round(payload['lexical'], 3)
+        enriched['structuralScore'] = round(payload['structural'], 3)
+        ranked.append(enriched)
+
+    ranked.sort(key=lambda item: (-float(item.get('score', 0) or 0), item.get('path') or '', item.get('startLine') or 0))
+    return ranked
+
+
+def prioritize_matches_by_coverage(matches: list[dict], query_intent: dict, min_coverage: float = 0.4) -> list[dict]:
+    query_terms = query_term_set(query_intent)
+    if len(query_terms) < 2:
+        return matches
+    high = []
+    low = []
+    for item in matches:
+        coverage = compute_match_coverage(item, query_terms)
+        enriched = dict(item)
+        enriched['coverage'] = round(coverage, 3)
+        lexical_score = float(enriched.get('lexicalScore', 0) or 0)
+        structural_score = float(enriched.get('structuralScore', 0) or 0)
+        structural_only = structural_score > 0 and lexical_score <= 0
+        if coverage >= min_coverage and not structural_only:
+            high.append(enriched)
+        else:
+            if structural_only and len(query_terms) >= 2:
+                enriched['score'] = float(enriched.get('score', 0) or 0) - 48.0
+            low.append(enriched)
+    low.sort(key=lambda item: (-float(item.get('score', 0) or 0), item.get('path') or '', item.get('startLine') or 0))
+    return high + low
+
+
+def prioritize_files_by_coverage(
+    file_paths: list[str],
+    snippet_items: list[dict],
+    query_intent: dict,
+    min_coverage: float = 0.35,
+) -> list[str]:
+    query_terms = query_term_set(query_intent)
+    if len(query_terms) < 2:
+        return file_paths
+
+    snippet_cov_by_path: dict[str, float] = {}
+    for item in snippet_items:
+        path = item.get('path')
+        if not path:
+            continue
+        cov = compute_match_coverage(item, query_terms)
+        if cov > snippet_cov_by_path.get(path, -1.0):
+            snippet_cov_by_path[path] = cov
+
+    high: list[str] = []
+    low: list[tuple[float, str]] = []
+    for path in file_paths:
+        coverage = max(compute_path_coverage(path, query_terms), snippet_cov_by_path.get(path, 0.0))
+        if coverage >= min_coverage:
+            high.append(path)
+        else:
+            low.append((coverage, path))
+    low.sort(key=lambda item: (-item[0], len(item[1]), item[1]))
+    return high + [path for _, path in low]
+
+
+def build_ranking_diagnostics(
+    snippet_items: list[dict],
+    file_paths: list[str],
+    query_intent: dict,
+    csr_context: dict,
+    topk_snippets: int,
+    topk_files: int,
+) -> dict:
+    query_terms = query_term_set(query_intent)
+    snippet_top = snippet_items[:max(topk_snippets, 1)]
+    file_top = file_paths[:max(topk_files, 1)]
+
+    snippet_cov_values = [compute_match_coverage(item, query_terms) for item in snippet_top] or [0.0]
+    file_cov_values = [compute_path_coverage(path, query_terms) for path in file_top] or [0.0]
+
+    csr_keys = {
+        item.get('id') or (item.get('path'), item.get('startLine'), item.get('endLine'), item.get('kind'))
+        for item in csr_context.get('matches', [])
+    }
+    top_keys = {
+        item.get('id') or (item.get('path'), item.get('startLine'), item.get('endLine'), item.get('kind'))
+        for item in snippet_top
+    }
+    csr_ratio = 0.0 if not top_keys else len(top_keys & csr_keys) / len(top_keys)
+    structural_only = 0
+    for item in snippet_top:
+        lexical_score = float(item.get('lexicalScore', 0) or 0)
+        structural_score = float(item.get('structuralScore', 0) or 0)
+        if structural_score > 0 and lexical_score <= 0:
+            structural_only += 1
+    structural_only_ratio = 0.0 if not snippet_top else structural_only / len(snippet_top)
+
+    return {
+        'topkCoverageAvg': round(sum(snippet_cov_values) / len(snippet_cov_values), 3),
+        'top1Coverage': round(snippet_cov_values[0], 3),
+        'topkFileCoverageAvg': round(sum(file_cov_values) / len(file_cov_values), 3),
+        'csrContributionRatio': round(csr_ratio, 3),
+        'csrStructuralOnlyRatio': round(structural_only_ratio, 3),
+    }
+
+
 def merge_ordered_paths(primary: list[str], secondary: list[str]) -> list[str]:
     merged = []
     seen = set()
@@ -1964,6 +2164,7 @@ def collect_hint_file_paths(
 
     query_terms = set(query_intent.get('keywords', []))
     exact_terms = set(query_intent.get('terms', []))
+    test_query = is_test_query(query_intent)
     ranked = []
 
     for path in index_files:
@@ -1989,9 +2190,13 @@ def collect_hint_file_paths(
         if role_matches_profile(role, read_profile):
             score += 10
         if is_documentation_file(normalized) and not is_documentation_query(query_intent):
-            score -= 10
+            score -= 18
         if is_script_like_file(normalized) and not is_script_query(query_intent):
-            score -= 6
+            score -= 10
+        if is_probably_test_path(normalized) and not test_query:
+            score -= 70
+        fuzzy_exact_overlap = count_fuzzy_term_overlap(path_terms, exact_terms)
+        score += exact_coverage_penalty(fuzzy_exact_overlap, exact_terms, role, read_profile)
 
         ranked.append((score, normalized))
 
@@ -2220,42 +2425,42 @@ def select_read_profile(query_intent: dict) -> dict:
     if 'test-surface' in labels or 'tests' in labels:
         return {
             'name': 'tests',
-            'focusTerms': {'test', 'spec', 'fixture', 'harness', 'assert', 'regression'},
-            'suppressTerms': {'route', 'router', 'dispatch'},
+            'focusTerms': set(),
+            'suppressTerms': set(),
             'focusEntrySuffixes': {'test.ts', 'test.py', 'test.js', 'spec.ts', 'spec.js'},
             'targetRoles': {'Test surface'},
-            'boostSymbolTerms': {'test', 'spec', 'fixture', 'assert'},
-            'penalizeSymbolTerms': {'route', 'router'},
+            'boostSymbolTerms': set(),
+            'penalizeSymbolTerms': set(),
         }
     if 'configuration' in labels or 'config' in labels:
         return {
             'name': 'config',
-            'focusTerms': {'config', 'settings', 'setting', 'env', 'schema', 'option'},
-            'suppressTerms': {'component', 'screen', 'page'},
+            'focusTerms': set(),
+            'suppressTerms': set(),
             'focusEntrySuffixes': {'config.ts', 'config.py', 'settings.ts', 'settings.py'},
             'targetRoles': {'Configuration', 'Type definition'},
-            'boostSymbolTerms': {'config', 'schema', 'settings', 'env'},
-            'penalizeSymbolTerms': {'component'},
+            'boostSymbolTerms': set(),
+            'penalizeSymbolTerms': set(),
         }
     if 'execution-path' in labels or 'failure-trace' in labels or 'trace' in labels:
         return {
             'name': 'trace',
-            'focusTerms': {'manager', 'handler', 'controller', 'router', 'route', 'dispatch', 'service', 'process'},
-            'suppressTerms': {'fixture', 'mock', 'readme'},
+            'focusTerms': set(),
+            'suppressTerms': set(),
             'focusEntrySuffixes': {'main.ts', 'index.ts', 'app.ts', 'app.py'},
             'targetRoles': {'Routing / transport', 'Handler / controller', 'Service', 'Runtime / integration'},
-            'boostSymbolTerms': {'dispatch', 'route', 'handler', 'service', 'process'},
-            'penalizeSymbolTerms': {'fixture', 'mock'},
+            'boostSymbolTerms': set(),
+            'penalizeSymbolTerms': set(),
         }
     if 'feature' in labels or 'implementation-surface' in labels:
         return {
             'name': 'feature',
-            'focusTerms': {'service', 'handler', 'controller', 'adapter', 'gateway', 'component', 'create', 'update', 'load', 'save'},
-            'suppressTerms': {'fixture', 'mock', 'readme'},
+            'focusTerms': set(),
+            'suppressTerms': set(),
             'focusEntrySuffixes': {'main.ts', 'index.ts', 'app.tsx', 'app.py'},
             'targetRoles': {'Service', 'Handler / controller', 'Runtime / integration', 'UI component'},
-            'boostSymbolTerms': {'create', 'update', 'load', 'save', 'dispatch'},
-            'penalizeSymbolTerms': {'fixture'},
+            'boostSymbolTerms': set(),
+            'penalizeSymbolTerms': set(),
         }
     return {
         'name': 'generic',
@@ -2362,7 +2567,7 @@ def prioritize_read_file_paths(
 ) -> list[str]:
     query_terms = set(query_intent.get('keywords', []))
     exact_terms = set(query_intent.get('terms', []))
-    test_query = any(term in {'test', 'tests', 'spec', 'harness', 'fixture', 'e2e', '测试', '用例'} for term in (query_terms | exact_terms))
+    test_query = is_test_query(query_intent)
     snippet_paths = [item.get('path') for item in snippet_items if item.get('path')]
     ordered_candidates = []
     ordered_candidates.extend(snippet_paths)
@@ -2388,11 +2593,11 @@ def prioritize_read_file_paths(
         if role_matches_profile(role, read_profile):
             score += 14
         if is_documentation_file(path) and not is_documentation_query(query_intent):
-            score -= 18
+            score -= 52
         if is_script_like_file(path) and not is_script_query(query_intent):
-            score -= 10
+            score -= 14
         if is_probably_test_path(path) and not test_query:
-            score -= 42
+            score -= 84
 
         keyword_overlap = len(path_terms & query_terms)
         if keyword_overlap:
@@ -2406,6 +2611,8 @@ def prioritize_read_file_paths(
         suppress_overlap = count_fuzzy_term_overlap(path_terms, read_profile.get('suppressTerms', set()))
         if suppress_overlap:
             score -= min(suppress_overlap, 2) * 6
+        fuzzy_exact_overlap = count_fuzzy_term_overlap(path_terms, exact_terms)
+        score += exact_coverage_penalty(fuzzy_exact_overlap, exact_terms, role, read_profile)
         if path_terms & {'constant', 'constants', 'i18n', 'locale', 'locales', 'asset', 'assets'}:
             score -= 8
 
@@ -2423,6 +2630,7 @@ def score_path_with_profile(path: str, query_intent: dict, read_profile: dict) -
     query_terms = set(query_intent.get('keywords', []))
     exact_terms = set(query_intent.get('terms', []))
     role = infer_read_file_role(path, {}) or ''
+    test_query = is_test_query(query_intent)
 
     focus_overlap = count_fuzzy_term_overlap(path_terms, read_profile.get('focusTerms', set()))
     if focus_overlap:
@@ -2438,13 +2646,21 @@ def score_path_with_profile(path: str, query_intent: dict, read_profile: dict) -
         score += min(len(path_terms & query_terms), 4) * 8
     if exact_terms and path_terms & exact_terms:
         score += min(len(path_terms & exact_terms), 3) * 10
+    fuzzy_exact_overlap = count_fuzzy_term_overlap(path_terms, exact_terms)
+    score += exact_coverage_penalty(fuzzy_exact_overlap, exact_terms, role, read_profile)
+    if is_documentation_file(path) and not is_documentation_query(query_intent):
+        score -= 16
+    if is_script_like_file(path) and not is_script_query(query_intent):
+        score -= 8
+    if is_probably_test_path(path) and not test_query:
+        score -= 42
 
     for index, hint in enumerate(query_intent.get('dynamicPathHints', [])[:6]):
         normalized_hint = normalize_rel_path(hint).lower()
         if lowered == normalized_hint or lowered.startswith(normalized_hint.rstrip('/') + '/'):
-            score += max(28 - index * 4, 8)
+            score += max(16 - index * 2, 6)
         elif normalized_hint and normalized_hint in lowered:
-            score += max(16 - index * 2, 4)
+            score += max(10 - index, 3)
 
     return score
 
@@ -2489,44 +2705,27 @@ def infer_query_intent_framework(query: str | None) -> dict:
 
     terms = extract_query_terms(query)
     keywords = expand_query_terms(terms)
-    term_set = set(terms) | set(keywords)
-    labels = []
-
-    bug_terms = {'bug', 'fix', 'error', 'fail', 'failed', 'crash', 'issue', '异常', '报错', '失败', '出错'}
-    review_terms = {'review', 'audit', 'risk', '审查', '检查', '风险'}
-    feature_terms = {'feature', 'implement', 'implementation', 'integration', 'integrate', 'connect', 'connection', 'link', 'linked', 'bridge', '接入', '实现', '新增', '增加', '链接', '对接', '联动', '串联'}
-    trace_terms = {'route', 'router', 'path', 'dispatch', 'handler', 'call', 'calling', 'flow', '调用', '链路', '流程', '路由', '入口', '对接', '联动'}
-    config_terms = {'config', 'setting', 'settings', 'env', 'schema', 'workflow', 'pipeline', 'release', 'ci', 'cd', 'action', 'actions', '配置', '环境'}
-    type_terms = {'type', 'types', 'schema', 'model', 'interface', '类型', '模型', '结构'}
-    test_terms = {'test', 'tests', 'spec', 'e2e', 'fixture', '测试', '用例'}
-
-    if contains_any_term(term_set, bug_terms):
-        labels.append('bugfix')
-    if contains_any_term(term_set, review_terms):
-        labels.append('review')
-    if contains_any_term(term_set, feature_terms):
-        labels.append('feature')
-    if contains_any_term(term_set, trace_terms):
-        labels.append('trace')
-    if contains_any_term(term_set, config_terms):
-        labels.append('config')
-    if contains_any_term(term_set, type_terms):
-        labels.append('types')
-    if contains_any_term(term_set, test_terms):
-        labels.append('tests')
-
+    
+    query_lower = query.lower()
+    labels = ['general-read']
     preferred_task = 'understand-project'
-    if 'review' in labels:
-        preferred_task = 'code-review'
-    elif 'bugfix' in labels or 'trace' in labels:
+
+    if 'bug' in query_lower or '失败' in query_lower or '排查' in query_lower or '修复' in query_lower:
         preferred_task = 'bugfix-investigation'
-    elif 'feature' in labels:
+        labels.append('trace')
+    elif 'add' in query_lower or '新增' in query_lower or '支持' in query_lower or 'feature' in query_lower:
         preferred_task = 'feature-delivery'
-    elif 'tests' in labels:
-        preferred_task = 'bugfix-investigation'
+        labels.append('feature')
+    elif 'review' in query_lower or 'review' in query_lower or '代码审查' in query_lower:
+        preferred_task = 'code-review'
+    elif 'config' in query_lower or '配置' in query_lower or 'workflow' in query_lower:
+        labels.append('config')
+
+    if 'workflow' in query_lower or 'release' in query_lower:
+        labels.append('config')
 
     return {
-        'labels': labels or ['general-read'],
+        'labels': labels,
         'keywords': keywords[:20],
         'terms': terms[:20],
         'preferredTask': preferred_task,
@@ -2541,7 +2740,7 @@ def rerank_read_matches(matches: list[dict], query_intent: dict, read_profile: d
     read_profile = read_profile or select_read_profile(query_intent)
     query_terms = set(query_intent.get('keywords', []))
     exact_terms = set(query_intent.get('terms', []))
-    test_query = any(term in {'test', 'tests', 'spec', 'harness', 'fixture', 'e2e', '测试', '用例'} for term in (query_terms | exact_terms))
+    test_query = is_test_query(query_intent)
     reranked = []
 
     for item in matches:
@@ -2559,16 +2758,16 @@ def rerank_read_matches(matches: list[dict], query_intent: dict, read_profile: d
         if role_matches_profile(role, read_profile):
             bonus += 12
         if is_documentation_file(path) and not is_documentation_query(query_intent):
-            bonus -= 18
+            bonus -= 58
         if kind == 'link' and (
             'feature' in query_intent.get('labels', [])
             or 'trace' in query_intent.get('labels', [])
         ) and not is_documentation_query(query_intent):
-            bonus -= 26
+            bonus -= 36
         if is_script_like_file(path) and not is_script_query(query_intent):
-            bonus -= 10
+            bonus -= 14
         if is_probably_test_path(path) and not test_query:
-            bonus -= 48
+            bonus -= 90
 
         keyword_overlap = len(haystack_terms & query_terms)
         if keyword_overlap:
@@ -2576,6 +2775,8 @@ def rerank_read_matches(matches: list[dict], query_intent: dict, read_profile: d
         exact_overlap = len(haystack_terms & exact_terms)
         if exact_overlap:
             bonus += min(exact_overlap, 3) * 12
+        fuzzy_exact_overlap = count_fuzzy_term_overlap(haystack_terms, exact_terms)
+        bonus += exact_coverage_penalty(fuzzy_exact_overlap, exact_terms, role, read_profile)
         exact_symbol_overlap = len(symbol_terms & exact_terms)
         if exact_symbol_overlap:
             bonus += min(exact_symbol_overlap, 2) * 18
@@ -2595,6 +2796,7 @@ def score_match_with_profile(path: str, symbol_terms: set[str], query_intent: di
     exact_terms = set(query_intent.get('terms', []))
     path_terms = set(extract_text_terms(lowered))
     role = infer_read_file_role(path, {}) or ''
+    test_query = is_test_query(query_intent)
 
     focus_overlap = count_fuzzy_term_overlap(path_terms, read_profile.get('focusTerms', set()))
     if focus_overlap:
@@ -2621,16 +2823,23 @@ def score_match_with_profile(path: str, symbol_terms: set[str], query_intent: di
     fuzzy_exact_overlap = count_fuzzy_term_overlap(path_terms, exact_terms)
     if fuzzy_exact_overlap:
         score += min(fuzzy_exact_overlap, 3) * 10
+    score += exact_coverage_penalty(fuzzy_exact_overlap, exact_terms, role, read_profile)
 
     for index, hint in enumerate(query_intent.get('dynamicPathHints', [])[:6]):
         normalized_hint = normalize_rel_path(hint).lower()
         if lowered == normalized_hint or lowered.startswith(normalized_hint.rstrip('/') + '/'):
-            score += max(24 - index * 4, 8)
+            score += max(14 - index * 2, 6)
         elif normalized_hint and normalized_hint in lowered:
-            score += max(14 - index * 2, 4)
+            score += max(8 - index, 3)
 
     if lowered.endswith('.json') and not (path_terms & (query_terms | exact_terms)):
         score -= 10
+    if is_documentation_file(path) and not is_documentation_query(query_intent):
+        score -= 24
+    if is_script_like_file(path) and not is_script_query(query_intent):
+        score -= 6
+    if is_probably_test_path(path) and not test_query:
+        score -= 36
 
     return score
 
@@ -2639,9 +2848,24 @@ def role_matches_profile(role: str | None, read_profile: dict) -> bool:
     return bool(role and role in read_profile.get('targetRoles', set()))
 
 
+def exact_coverage_penalty(
+    fuzzy_exact_overlap: int,
+    exact_terms: set[str],
+    role: str | None,
+    read_profile: dict,
+) -> int:
+    if not exact_terms or role_matches_profile(role, read_profile):
+        return 0
+    if len(exact_terms) >= 3 and fuzzy_exact_overlap <= 1:
+        return -26
+    if len(exact_terms) >= 2 and fuzzy_exact_overlap == 0:
+        return -16
+    return 0
+
+
 def is_documentation_query(query_intent: dict) -> bool:
-    terms = set(query_intent.get('keywords', [])) | set(query_intent.get('terms', []))
-    return contains_any_term(terms, {'doc', 'docs', 'documentation', 'readme', 'guide', 'manual', 'wiki', '说明', '文档'})
+    labels = set(query_intent.get('labels', []))
+    return 'documentation' in labels
 
 
 def is_documentation_file(path: str) -> bool:
@@ -2657,8 +2881,13 @@ def is_documentation_file(path: str) -> bool:
 
 
 def is_script_query(query_intent: dict) -> bool:
-    terms = set(query_intent.get('keywords', [])) | set(query_intent.get('terms', []))
-    return contains_any_term(terms, {'script', 'setup', 'build', 'release', 'deploy', 'cli', '命令', '脚本'})
+    labels = set(query_intent.get('labels', []))
+    return 'script' in labels
+
+
+def is_test_query(query_intent: dict) -> bool:
+    labels = set(query_intent.get('labels', []))
+    return 'tests' in labels or 'test-surface' in labels
 
 
 def is_script_like_file(path: str) -> bool:
@@ -2666,10 +2895,6 @@ def is_script_like_file(path: str) -> bool:
     suffix = Path(normalized).suffix.lower()
     name_terms = set(extract_text_terms(Path(normalized).name))
     return suffix in {'.sh', '.ps1', '.bat', '.cmd'} or bool(name_terms & {'script', 'setup', 'build', 'release', 'deploy', 'cli'})
-
-
-def contains_any_term(terms: set[str], candidates: set[str]) -> bool:
-    return count_fuzzy_term_overlap(terms, candidates) > 0
 
 
 def count_fuzzy_term_overlap(left: set[str], right: set[str]) -> int:

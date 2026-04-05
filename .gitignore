@@ -3,3 +3,4 @@ repo/
 repo/progress/
 __pycache__/
 *.pyc
+docs/
