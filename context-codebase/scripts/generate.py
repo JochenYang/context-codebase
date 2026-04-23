@@ -61,7 +61,12 @@ USE_SQLITE_INDEX = True
 EXCLUDE_DIRS = {
     'node_modules', '.git', 'dist', 'build', 'venv', '__pycache__',
     '.venv', 'env', '.env', 'coverage', '.next', '.nuxt', '.cache',
-    '.svn', '.hg', 'vendor', 'target', 'out', '.idea', '.vscode'
+    '.svn', '.hg', 'vendor', 'target', 'out', '.idea', '.vscode',
+    'site-packages', 'dist-packages', '.tox', '.nox', '.pytest_cache',
+    '.mypy_cache', '.ruff_cache', '.hypothesis', '.eggs', '.yarn',
+    '.pnpm-store', '.turbo', '.parcel-cache', '.sass-cache', '.gradle',
+    '.terraform', '.serverless', '.aws-sam', '.docusaurus', '.expo',
+    '.vercel', '.svelte-kit'
 }
 
 EXCLUDE_PATH_PREFIXES = {
@@ -164,10 +169,27 @@ def normalize_rel_path(path: str) -> str:
     return path.replace('\\', '/')
 
 
+def is_generated_env_dir(name: str) -> bool:
+    normalized = (name or '').strip().lower()
+    if not normalized:
+        return False
+    if normalized in EXCLUDE_DIRS:
+        return True
+    if re.fullmatch(r'(?:\.?venv|env)(?:[-_.]?\d+(?:\.\d+)*)?', normalized):
+        return True
+    if normalized.endswith('.egg-info'):
+        return True
+    return normalized.startswith('python') and normalized[6:].replace('.', '').isdigit()
+
+
 def is_excluded_path(rel_path: str) -> bool:
     normalized = normalize_rel_path(rel_path).strip('./')
     if not normalized:
         return False
+
+    parts = [part.strip().lower() for part in normalized.split('/') if part.strip()]
+    if any(is_generated_env_dir(part) for part in parts):
+        return True
 
     return any(
         normalized == prefix or normalized.startswith(prefix + '/')
@@ -3475,7 +3497,7 @@ def scan_files(project_path: str) -> list[str]:
         # Filter out excluded directories in-place
         filtered_dirs = []
         for dir_name in dirs:
-            if dir_name in EXCLUDE_DIRS:
+            if is_generated_env_dir(dir_name):
                 continue
             rel_dir = dir_name if not rel_root else f'{rel_root}/{dir_name}'
             if is_excluded_path(rel_dir):
