@@ -63,19 +63,20 @@ skill 会生成并复用以下文件：
 
 ### `/context-codebase refresh`
 
-强制刷新模式。
+增量刷新模式。
 
 行为：
 
-- 不复用缓存
-- 重新扫描仓库
-- 覆盖现有快照
+- 重新计算源码指纹并与缓存产物对比
+- 源码未变化时直接复用已有快照和索引
+- 源码变化时只增量刷新索引元数据和受影响 chunks
+- 保留既有快照结构，不强制做整仓重建
 
 适用场景：
 
-- 代码发生明显变化
-- 当前快照已经过时
-- 你明确想要重新扫描一遍
+- 代码发生变化，想让缓存及时跟上
+- 想刷新检索数据，但不想每次都全量重扫
+- 计划先刷新，再执行 `read` 或 `report`
 
 ### `/context-codebase read`
 
@@ -170,6 +171,28 @@ skill 会生成并复用以下文件：
 
 这让 `read` 在保持轻量的同时，仍然能回答不少具体实现问题。
 
+## Query 与编码建议
+
+针对定向问题，推荐把 `--task` 和 UTF-8 安全的 query 输入通道一起使用。
+
+- Windows 下非 ASCII 查询优先 `--query-escaped`
+- 其次使用 UTF-8 或 UTF-8 BOM 文件配合 `--query-file`
+- 再次使用 `--query-stdin`
+- Shell 编码不稳定时，避免直接用原始 `--query` 传中文
+
+示例：
+
+```bash
+python context-codebase/scripts/generate.py <项目路径> --read --task feature-delivery --query-escaped "\\u8def\\u7531 message routing"
+python context-codebase/scripts/generate.py <项目路径> --read --task bugfix-investigation --query-file query.txt
+cat query.txt | python context-codebase/scripts/generate.py <项目路径> --read --task onboarding --query-stdin
+```
+
+CLI 输出约定：
+
+- stdout 只输出 UTF-8 JSON
+- warning 和 error 一律输出到 stderr
+
 ## 安装结构
 
 当前仓库中，可分发的 skill 源文件位于 `./context-codebase/`。
@@ -226,9 +249,12 @@ context-codebase/
 
 ```bash
 python context-codebase/scripts/generate.py <项目路径>
-python context-codebase/scripts/generate.py <项目路径> --force
+python context-codebase/scripts/generate.py <项目路径> refresh
 python context-codebase/scripts/generate.py <项目路径> --read
+python context-codebase/scripts/generate.py <项目路径> --read --refresh
 python context-codebase/scripts/generate.py <项目路径> --read --task feature-delivery --query "skill download flow"
+python context-codebase/scripts/generate.py <项目路径> --read --task feature-delivery --query-escaped "\\u6280\\u80fd download flow"
+python context-codebase/scripts/generate.py <项目路径> --read --task feature-delivery --query-file query.txt
 python context-codebase/scripts/generate.py <项目路径> --report --task bugfix-investigation --query "message routing"
 ```
 

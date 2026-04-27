@@ -42,7 +42,7 @@ inspection.
 Use the mode that matches the question you need answered:
 
 - `/context-codebase`: build or reuse a snapshot for high-level orientation
-- `/context-codebase refresh`: force a fresh scan after meaningful repo changes
+- `/context-codebase refresh`: incrementally refresh the index after meaningful repo changes
 - `/context-codebase read`: answer a focused implementation question quickly
 - `/context-codebase report`: prepare a deeper host-side technical walkthrough
 
@@ -66,19 +66,20 @@ Use it when:
 
 ### `/context-codebase refresh`
 
-Force-refresh mode.
+Incremental refresh mode.
 
 Behavior:
 
-- ignores cache reuse
-- rescans the repository
-- overwrites the existing snapshot
+- recomputes the source fingerprint and compares it with cached artifacts
+- reuses the cached snapshot and index when nothing changed
+- incrementally refreshes index metadata and changed chunks when sources changed
+- keeps the existing snapshot structure instead of forcing a full rebuild
 
 Use it when:
 
-- the codebase changed significantly
-- the current snapshot is stale
-- you explicitly want a fresh scan
+- the codebase changed and you want the cache to catch up
+- you want fresh retrieval data without paying for a full rebuild
+- you plan to run `read` or `report` against the latest sources
 
 ### `/context-codebase read`
 
@@ -174,6 +175,28 @@ embedding-backed semantic search stack:
 This makes `read` fast enough for handoff workflows while still being useful
 for focused implementation questions.
 
+## Query And Encoding Guidance
+
+For focused questions, prefer `--task` plus a UTF-8 safe query channel.
+
+- Use `--query-escaped` first for Windows-safe non-ASCII queries
+- Then use `--query-file` with a UTF-8 or UTF-8 BOM file
+- Then use `--query-stdin`
+- Avoid raw `--query` for non-ASCII input when the shell encoding is unreliable
+
+Examples:
+
+```bash
+python context-codebase/scripts/generate.py <project_path> --read --task feature-delivery --query-escaped "\\u8def\\u7531 message routing"
+python context-codebase/scripts/generate.py <project_path> --read --task bugfix-investigation --query-file query.txt
+cat query.txt | python context-codebase/scripts/generate.py <project_path> --read --task onboarding --query-stdin
+```
+
+CLI output contract:
+
+- stdout is reserved for UTF-8 JSON payloads
+- warnings and errors are emitted on stderr
+
 ## Installation
 
 This repository keeps the distributable skill under `./context-codebase/`.
@@ -230,9 +253,12 @@ From this repository root, use:
 
 ```bash
 python context-codebase/scripts/generate.py <project_path>
-python context-codebase/scripts/generate.py <project_path> --force
+python context-codebase/scripts/generate.py <project_path> refresh
 python context-codebase/scripts/generate.py <project_path> --read
+python context-codebase/scripts/generate.py <project_path> --read --refresh
 python context-codebase/scripts/generate.py <project_path> --read --task feature-delivery --query "skill download flow"
+python context-codebase/scripts/generate.py <project_path> --read --task feature-delivery --query-escaped "\\u6280\\u80fd download flow"
+python context-codebase/scripts/generate.py <project_path> --read --task feature-delivery --query-file query.txt
 python context-codebase/scripts/generate.py <project_path> --report --task bugfix-investigation --query "message routing"
 ```
 
