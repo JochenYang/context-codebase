@@ -4,3 +4,8 @@ repo/progress/
 __pycache__/
 *.pyc
 docs/
+.arts
+*.vsix
+context-codebase/scripts/models/
+*.onnx
+context-codebase/repo/

@@ -29,6 +29,9 @@ from context_engine.semantic_chunker import SemanticChunker
 from context_engine.chunk_tracker import ChunkTracker
 from context_engine.sqlite_index import SQLiteIndex
 
+from context_engine.fuzzy_search import FuzzySymbolSearcher
+from context_engine.git_index import collect_git_stats, enrich_chunks_with_git
+
 try:
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover
@@ -53,11 +56,6 @@ SQLITE_FILENAME = f'{SKILL_NAME}.db'
 LEGACY_SNAPSHOT_FILENAMES = [f'{legacy_name}.json' for legacy_name in LEGACY_SKILL_NAMES]
 LEGACY_INDEX_STATE_FILENAMES = [f'{legacy_name}.index.json' for legacy_name in LEGACY_SKILL_NAMES]
 LEGACY_SQLITE_FILENAMES = [f'{legacy_name}.db' for legacy_name in LEGACY_SKILL_NAMES]
-
-# Feature flags for advanced chunking modes
-USE_SEMANTIC_CHUNKING = False
-USE_INCREMENTAL_MODE = False
-USE_SQLITE_INDEX = True
 
 EXCLUDE_DIRS = {
     'node_modules', '.git', 'dist', 'build', 'venv', '__pycache__',
@@ -1504,6 +1502,7 @@ def write_snapshot(output_file: Path, snapshot: dict, chunks: list[dict] | None 
 
             sqlite_chunks = chunks if chunks is not None else snapshot.get('chunks', [])
             if sqlite_chunks:
+                print(f'  writing {len(sqlite_chunks):,} chunks to FTS5 index...', file=sys.stderr)
                 # Normalize chunk format for SQLiteIndex
                 normalized_chunks = []
                 for chunk in sqlite_chunks:
@@ -1521,6 +1520,7 @@ def write_snapshot(output_file: Path, snapshot: dict, chunks: list[dict] | None 
                 sqlite_index.upsert_chunks(normalized_chunks)
 
                 # Delete stale chunks (not in current snapshot)
+                print(f'  cleaning stale chunks...', file=sys.stderr)
                 valid_ids = {chunk['id'] for chunk in sqlite_chunks if chunk.get('id')}
                 sqlite_index.delete_stale(valid_ids)
 
@@ -3820,6 +3820,7 @@ def generate_snapshot(project_path: str, force: bool = False) -> dict:
     modules = summarize_modules_from_records(file_records)
     analysis = build_analysis_metadata(file_records)
     chunks = build_chunks(file_records)
+
     chunk_catalog = build_chunk_catalog(chunks, important_files)
     index_metadata = build_index_metadata(
         base,
@@ -3916,7 +3917,21 @@ def generate_snapshot(project_path: str, force: bool = False) -> dict:
     architecture = infer_architecture(files, project_path)
     graph = build_code_graph(file_records, unique_routes, unique_models, key_functions, workspace, Path(project_path))
     external_context = collect_external_context(project_path, file_records)
+
+    # Build git statistics
+    git_stats = {}
+    try:
+        git_stats = collect_git_stats(project_path, [r['path'] for r in file_records])
+        if git_stats:
+            chunks = enrich_chunks_with_git(chunks, git_stats)
+    except Exception:
+        pass
+
     retrieval, context_packs = build_retrieval_artifacts(chunks, important_files, graph, external_context)
+
+    # Build fuzzy symbol index
+    fuzzy_searcher = FuzzySymbolSearcher()
+    fuzzy_searcher.build_index(chunks)
 
     # Build snapshot
     snapshot = {
@@ -3949,14 +3964,23 @@ def generate_snapshot(project_path: str, force: bool = False) -> dict:
         'apiRoutes': sorted(unique_routes, key=lambda item: (item['handler'], item['path'], item['method'])),
         'dataModels': sorted(unique_models, key=lambda item: (item['file'], item['type'], item['name'])),
         'keyFunctions': key_functions,
-        'architecture': architecture
+        'architecture': architecture,
+        'gitStats': git_stats,
+        'symbolIndex': fuzzy_searcher.to_dict(),
     }
 
     # Save to file
     write_snapshot(output_file, snapshot, chunks=chunks)
-    save_index_state(index_state_file, current_signatures, chunks, file_records, source_fingerprint)
+    try:
+        save_index_state(index_state_file, current_signatures, chunks, file_records, source_fingerprint)
+    except Exception:
+        print(f'Warning: index state save failed (snapshot is still valid)', file=sys.stderr)
 
-    print(f"Snapshot saved to: {output_file}", file=sys.stderr)
+    print(
+        f"Snapshot saved to: {output_file}\n"
+        f"  {total_lines:,} lines, {len(file_records):,} files, {len(chunks):,} chunks",
+        file=sys.stderr,
+    )
     return snapshot
 
 
