@@ -8,4 +8,4 @@ docs/
 *.vsix
 context-codebase/scripts/models/
 *.onnx
-context-codebase/repo/opencode/
+context-codebase/repo/
