@@ -11,10 +11,17 @@ import os
 import re
 import subprocess
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
 from .external_context import decode_subprocess_output
+
+
+def _fetch_authors_for_file(project_path: str, path: str, since_days: int) -> tuple[str, list[dict]]:
+    """Fetch recent authors for a single file (used for parallel execution)."""
+    authors = _get_file_authors(project_path, path, since_days)
+    return (path, authors)
 
 
 def collect_git_stats(
@@ -22,6 +29,7 @@ def collect_git_stats(
     file_paths: list[str],
     max_blame_files: int = 50,
     since_days: int = 90,
+    max_workers: int = 4,
 ) -> dict:
     """
     Collect comprehensive git statistics for the project.
@@ -57,10 +65,15 @@ def collect_git_stats(
     ]
 
     # Recent authors per file (for top changed files)
-    for path, _ in sorted_freq[:max_blame_files]:
-        authors = _get_file_authors(project_path, path, since_days)
-        if authors:
-            result['recentAuthors'][path] = authors
+    # Threading: _get_file_authors is I/O-bound (subprocess calls), parallelize for speed
+    paths_to_fetch = [path for path, _ in sorted_freq[:max_blame_files]]
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        for path, authors in executor.map(
+            lambda p: _fetch_authors_for_file(project_path, p, since_days),
+            paths_to_fetch,
+        ):
+            if authors:
+                result['recentAuthors'][path] = authors
 
     return result
 
