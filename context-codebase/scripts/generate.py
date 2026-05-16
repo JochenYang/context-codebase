@@ -197,6 +197,20 @@ def is_excluded_path(rel_path: str) -> bool:
     )
 
 
+def validate_path_within_root(root: Path, file_path: str) -> str | None:
+    """Ensure a resolved file path is within the project root (path traversal protection).
+    Returns the original file_path on success, not the resolved form, to avoid
+    breaking relative path computation when the OS uses different path representations
+    (e.g., Windows short vs long filename)."""
+    try:
+        resolved = Path(file_path).resolve()
+        root_resolved = root.resolve()
+        resolved.relative_to(root_resolved)
+        return file_path
+    except (ValueError, OSError):
+        return None
+
+
 def clean_content_for_parsing(content: str, ext: str) -> str:
     """Remove common comments to reduce regex false positives."""
     if ext == '.py':
@@ -709,8 +723,13 @@ def extract_exports(content: str, language: str | None) -> list[str]:
 def _process_single_file(file_path: str, base: Path) -> tuple[dict | None, int]:
     """Process a single file record (used for parallel execution)."""
     try:
-        path_obj = Path(file_path)
-        rel_path = normalize_rel_path(os.path.relpath(file_path, base))
+        # Path traversal protection
+        safe_path = validate_path_within_root(base, file_path)
+        if safe_path is None:
+            return (None, 0)
+
+        path_obj = Path(safe_path)
+        rel_path = normalize_rel_path(os.path.relpath(path_obj, base))
         language = detect_language(rel_path)
         file_stat = path_obj.stat()
         file_size = file_stat.st_size
@@ -1420,9 +1439,17 @@ def build_index_files_payload(
     return files_payload
 
 
+def atomic_write_json(path: Path, payload: dict) -> None:
+    """Write JSON atomically: write to .tmp then replace target, preventing partial writes on crash."""
+    import os
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + '.tmp')
+    tmp_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding='utf-8')
+    os.replace(str(tmp_path), str(path))
+
+
 def save_index_state_payload(index_state_file: Path, payload: dict) -> None:
-    index_state_file.parent.mkdir(parents=True, exist_ok=True)
-    index_state_file.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding='utf-8')
+    atomic_write_json(index_state_file, payload)
 
 
 def save_index_state(
@@ -1510,9 +1537,13 @@ def load_existing_snapshot(output_file: Path) -> dict | None:
         return None
 
 
-def write_snapshot(output_file: Path, snapshot: dict, chunks: list[dict] | None = None) -> None:
-    output_file.parent.mkdir(parents=True, exist_ok=True)
-    output_file.write_text(json.dumps(snapshot, indent=2, ensure_ascii=False), encoding='utf-8')
+def write_snapshot(
+    output_file: Path,
+    snapshot: dict,
+    chunks: list[dict] | None = None,
+    changed_paths: set[str] | None = None,
+) -> None:
+    atomic_write_json(output_file, snapshot)
 
     # Write to SQLite index when enabled
     if USE_SQLITE_INDEX:
@@ -1537,7 +1568,13 @@ def write_snapshot(output_file: Path, snapshot: dict, chunks: list[dict] | None 
                         'signals': chunk.get('signals', []),
                         'preview': chunk.get('preview', ''),
                     })
-                sqlite_index.upsert_chunks(normalized_chunks)
+
+                # Use incremental update when changed_paths is provided, else full rebuild
+                if changed_paths:
+                    print(f'  incremental update for {len(changed_paths):,} changed paths...', file=sys.stderr)
+                    sqlite_index.upsert_chunks_incremental(normalized_chunks, changed_paths)
+                else:
+                    sqlite_index.upsert_chunks(normalized_chunks)
 
                 # Delete stale chunks (not in current snapshot)
                 print(f'  cleaning stale chunks...', file=sys.stderr)
@@ -4166,7 +4203,8 @@ def refresh_index(project_path: str) -> dict:
         next_chunks,
         existing_snapshot.get('importantFiles', []),
     )
-    write_snapshot(output_file, existing_snapshot, chunks=next_chunks)
+    changed_paths_for_fts5 = changed_or_new_paths | removed_paths
+    write_snapshot(output_file, existing_snapshot, chunks=next_chunks, changed_paths=changed_paths_for_fts5)
     return existing_snapshot
 
 

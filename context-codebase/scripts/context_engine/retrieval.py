@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from collections import Counter, defaultdict
 
+from context_engine.search_ranking import HybridSearchRanker
+
 
 STOPWORDS = {
     'the', 'and', 'for', 'with', 'from', 'that', 'this', 'into', 'when', 'want',
@@ -147,62 +149,73 @@ def retrieve_chunks(
     file_dependency_map: dict[str, list[str]],
     task: str,
     limit: int,
+    use_hybrid: bool = True,
 ) -> list[dict]:
-    query_tokens = tokenize(query)
-    scored = []
-
-    for chunk in chunks:
-        score, reasons = score_chunk(
-            chunk,
-            query_tokens,
-            important_ranks,
-            recent_changed,
-            task,
+    if use_hybrid:
+        ranker = HybridSearchRanker(
+            important_ranks=important_ranks,
+            recent_changed=recent_changed,
+            file_dependency_map=file_dependency_map,
         )
-        if score <= 0:
-            continue
-        scored.append((score, reasons, chunk))
+        selected = ranker.rank(query, chunks, task=task, limit=limit)
+        selected_ids = {item['id'] for item in selected}
+        selected_files = {item['path'] for item in selected}
+    else:
+        query_tokens = tokenize(query)
+        scored = []
 
-    scored.sort(key=lambda item: (-item[0], item[2]['path'], item[2]['startLine']))
-    selected = []
-    seen_ids = set()
-    selected_files = set()
-
-    for score, reasons, chunk in scored:
-        if chunk['id'] in seen_ids:
-            continue
-        seen_ids.add(chunk['id'])
-        selected_files.add(chunk['path'])
-        selected.append(format_chunk_match(chunk, score, reasons))
-        if len(selected) >= limit:
-            break
-
-    if task in {'bugfix-investigation', 'code-review'}:
         for chunk in chunks:
-            if chunk['path'] not in recent_changed or chunk['id'] in seen_ids:
+            score, reasons = score_chunk(
+                chunk,
+                query_tokens,
+                important_ranks,
+                recent_changed,
+                task,
+            )
+            if score <= 0:
                 continue
-            selected.append(format_chunk_match(chunk, 10, ['recently changed file']))
-            seen_ids.add(chunk['id'])
+            scored.append((score, reasons, chunk))
+
+        scored.sort(key=lambda item: (-item[0], item[2]['path'], item[2]['startLine']))
+        selected = []
+        selected_ids = set()
+        selected_files = set()
+
+        for score, reasons, chunk in scored:
+            if chunk['id'] in selected_ids:
+                continue
+            selected_ids.add(chunk['id'])
             selected_files.add(chunk['path'])
+            selected.append(format_chunk_match(chunk, score, reasons))
             if len(selected) >= limit:
                 break
 
-    if task in {'feature-delivery', 'bugfix-investigation'}:
-        dependency_expansions = []
-        for path in list(selected_files):
-            for dependency in file_dependency_map.get(path, []):
-                dependency_expansions.append(dependency)
-
-        for dependency in dependency_expansions:
+        if task in {'bugfix-investigation', 'code-review'}:
             for chunk in chunks:
-                if chunk['path'] != dependency or chunk['id'] in seen_ids:
+                if chunk['path'] not in recent_changed or chunk['id'] in selected_ids:
                     continue
-                selected.append(format_chunk_match(chunk, 8, ['graph expansion']))
-                seen_ids.add(chunk['id'])
+                selected.append(format_chunk_match(chunk, 10, ['recently changed file']))
+                selected_ids.add(chunk['id'])
+                selected_files.add(chunk['path'])
                 if len(selected) >= limit:
                     break
-            if len(selected) >= limit:
-                break
+
+        if task in {'feature-delivery', 'bugfix-investigation'}:
+            dependency_expansions = []
+            for path in list(selected_files):
+                for dependency in file_dependency_map.get(path, []):
+                    dependency_expansions.append(dependency)
+
+            for dependency in dependency_expansions:
+                for chunk in chunks:
+                    if chunk['path'] != dependency or chunk['id'] in selected_ids:
+                        continue
+                    selected.append(format_chunk_match(chunk, 8, ['graph expansion']))
+                    selected_ids.add(chunk['id'])
+                    if len(selected) >= limit:
+                        break
+                if len(selected) >= limit:
+                    break
 
     return selected[:limit]
 

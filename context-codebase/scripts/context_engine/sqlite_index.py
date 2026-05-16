@@ -89,6 +89,54 @@ class SQLiteIndex:
         conn.commit()
         conn.close()
 
+    def upsert_chunks_incremental(self, chunks: list[dict], changed_paths: set[str]) -> None:
+        """Incremental FTS5 update — only delete and re-insert chunks for changed paths.
+
+        Args:
+            chunks: Full list of all chunks in the current index state.
+            changed_paths: Set of file paths whose chunks should be replaced.
+                          Paths in this set but absent from ``chunks`` (deleted files)
+                          will have their old chunks removed from the FTS5 index.
+        """
+        if not changed_paths:
+            return
+
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        # 1. Delete old chunks for all changed paths
+        for path in changed_paths:
+            normalized_path = path.replace('"', '').strip()
+            if normalized_path:
+                cursor.execute("DELETE FROM chunks WHERE path = ?", (normalized_path,))
+
+        # 2. Insert only chunks belonging to changed paths
+        rows = [
+            (
+                chunk.get("id", ""),
+                chunk.get("path", ""),
+                chunk.get("startLine"),
+                chunk.get("endLine"),
+                chunk.get("kind", ""),
+                chunk.get("name", ""),
+                chunk.get("language", ""),
+                json.dumps(chunk.get("signals", [])),
+                chunk.get("preview", "")[:200],
+                chunk.get("content_hash", ""),
+            )
+            for chunk in chunks
+            if chunk.get("path", "") in changed_paths
+        ]
+        if rows:
+            cursor.executemany("""
+                INSERT INTO chunks
+                (id, path, start_line, end_line, kind, name, language, signals, preview, content_hash)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, rows)
+
+        conn.commit()
+        conn.close()
+
     def search(self, query: str, limit: int = 10) -> list[dict]:
         """Search chunks using FTS5 MATCH with strict and relaxed expressions."""
         conn = sqlite3.connect(self.db_path)

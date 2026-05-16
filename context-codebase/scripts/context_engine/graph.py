@@ -67,6 +67,27 @@ def build_code_graph(
                 'confidence': record.get('analysisConfidence', 'none'),
             })
 
+    # Enrich symbols with qualified names and function signatures
+    content_by_path: dict[str, str] = {}
+    for record in file_records:
+        content_by_path[record['path']] = record.get('content', '')
+
+    for symbol in symbol_index:
+        file_path = symbol['file']
+        kind = symbol['kind']
+        name = symbol['name']
+        symbol['qualifiedName'] = f"{file_path}::({kind}){name}"
+
+        if kind == 'function':
+            line_num = symbol.get('line')
+            if isinstance(line_num, int) and line_num > 0:
+                content = content_by_path.get(file_path, '')
+                if content:
+                    lines = content.split('\n')
+                    if line_num <= len(lines):
+                        raw = (lines[line_num - 1] or '').strip()
+                        symbol['signature'] = raw[:120]
+
     inbound_counts = Counter()
     outbound_counts = Counter()
     for edge in dependency_edges:
@@ -85,6 +106,36 @@ def build_code_graph(
         })
 
     hotspots.sort(key=lambda item: (-item['inbound'], -item['signals'], item['path']))
+
+    # Build cross-file symbol reference edges
+    file_exports: dict[str, set[str]] = defaultdict(set)
+    for record in file_records:
+        for export_name in record.get('exports', []):
+            file_exports[record['path']].add(export_name)
+
+    file_symbols_by_name: dict[str, dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
+    for symbol in symbol_index:
+        qname = symbol.get('qualifiedName', '')
+        file_symbols_by_name[symbol['file']][symbol['name']].append(qname)
+
+    symbol_edges: list[dict] = []
+    for edge in dependency_edges:
+        src_file = edge['source']
+        tgt_file = edge['target']
+
+        for export_name in file_exports.get(tgt_file, set()):
+            src_qnames = file_symbols_by_name.get(src_file, {}).get(export_name, [])
+            tgt_qnames = file_symbols_by_name.get(tgt_file, {}).get(export_name, [])
+            if src_qnames and tgt_qnames:
+                for src_qn in src_qnames:
+                    for tgt_qn in tgt_qnames:
+                        symbol_edges.append({
+                            'source': src_qn,
+                            'target': tgt_qn,
+                            'kind': 'calls',
+                            'confidence': 'inferred',
+                            'line': 0,
+                        })
 
     route_to_handler = [
         {
@@ -108,7 +159,7 @@ def build_code_graph(
     return {
         'stats': {
             'files': len(file_records),
-            'symbols': len(symbol_index),
+            'symbols': len({s.get('qualifiedName', '') for s in symbol_index}),
             'dependencyEdges': len(dependency_edges),
             'routeCount': len(unique_routes),
             'modelCount': len(unique_models),
@@ -128,6 +179,8 @@ def build_code_graph(
         'symbolIndex': sorted(symbol_index, key=lambda item: (item['file'], item.get('line') or 0, item['kind'], item['name']))[:240],
         'hotspots': hotspots[:30],
         'pathIndex': build_path_index(path_to_record),
+        'symbolEdges': symbol_edges,
+        'symbolEdgeCount': len(symbol_edges),
     }
 
 
